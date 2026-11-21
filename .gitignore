@@ -1,0 +1,15 @@
+# Recordings stay on your laptop (they're personal sleep data)
+data/
+
+# Python junk
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Editor / OS junk
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store
