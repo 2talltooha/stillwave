@@ -22,7 +22,7 @@ A 60 GHz mmWave radar watches breathing from about a metre away, with nothing wo
 3. Optional, for the Gemini night summary: get a free key at aistudio.google.com and put
    `GEMINI_API_KEY=your-key` in a file called `.env` next to `server.py` (it's gitignored).
    For phone notifications, install the free ntfy app, subscribe to a long random topic name,
-   and add `NTFY_TOPIC=that-name` to `.env`. The night summary arrives 10 minutes after you get up.
+   and add `NTFY_TOPIC=that-name` to `.env`. The night summary arrives 10 minutes after you get up, plus a weekly roll-up on Sundays.
 4. `python server.py`
 5. Open http://localhost:8000 (live) and http://localhost:8000/report (night report).
 

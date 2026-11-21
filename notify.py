@@ -58,3 +58,17 @@ def night_message(report, summary_text=None):
     if summary_text:
         text += "\n\n" + summary_text
     return text
+
+
+def week_message(week):
+    """Screen-Time-style weekly roll-up."""
+    n = week["nights"]
+    parts = [f"{n} night{'s' if n != 1 else ''} tracked",
+             f"avg {_hm(week['avg_in_bed_min'])} in bed",
+             f"asleep ~{_hm(week['avg_asleep_min'])}"]
+    if week.get("breath_avg"):
+        parts.append(f"{round(week['breath_avg'])} breaths/min")
+    if week.get("dips_per_hour") is not None:
+        parts.append(f"{week['dips_per_hour']} breathing dips/h")
+    longest = week["longest"]
+    return " · ".join(parts) + f"\n\nLongest night: {longest['night']} ({_hm(longest['in_bed_min'])} in bed)."

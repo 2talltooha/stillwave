@@ -68,6 +68,7 @@
     <p id="summaryText" class="note">A short plain-language summary of this recording, written by Gemini from the numbers on this page.</p>
     <button id="summaryBtn">Summarize with Gemini</button>
     <button id="phoneBtn" class="secondary">Send to my phone</button>
+    <button id="weekBtn" class="secondary">Send my week</button>
     <span id="phoneStatus" class="note"></span>
   </div>
 
@@ -213,6 +214,19 @@ async function sendToPhone() {
   btn.disabled = false;
 }
 
+async function sendWeek() {
+  const btn = $("weekBtn"), st = $("phoneStatus");
+  btn.disabled = true; st.className = "note"; st.textContent = "Sending your week...";
+  try {
+    const r = await fetch("/api/notify_week", { method: "POST" }).then(x => x.json());
+    if (r.error) { st.className = "note err"; st.textContent = r.error; }
+    else { st.textContent = "Weekly summary sent. Check your phone."; }
+  } catch (e) {
+    st.className = "note err"; st.textContent = "The server didn't answer. Is it running?";
+  }
+  btn.disabled = false;
+}
+
 async function load(file) {
   resetSummary();
   $("phoneStatus").textContent = "";
@@ -255,6 +269,7 @@ async function load(file) {
   $("file").onchange = e => load(e.target.value);
   $("summaryBtn").onclick = summarize;
   $("phoneBtn").onclick = sendToPhone;
+  $("weekBtn").onclick = sendWeek;
 })();
 </script>
 </body>

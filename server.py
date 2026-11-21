@@ -161,6 +161,9 @@ class Sensor:
             send_night(self.path, "Stillwave - last night")
             text = "Morning summary sent to your phone"
             self.morning_sent = True
+            if datetime.now().weekday() == 6:          # Sunday: weekly roll-up too, like Screen Time
+                send_week()
+                text += " (plus your week)"
         except notify.NotifyError as e:
             text = f"Couldn't send the morning summary: {e}"
         with self.lock:
@@ -256,6 +259,13 @@ def send_night(path, title):
     notify.send(title, notify.night_message(rep, text))
 
 
+def send_week():
+    week = sleepdata.week_summary(DATA)
+    if not week["nights"]:
+        raise notify.NotifyError("No nights recorded in the last 7 days yet.")
+    notify.send("Stillwave - your week", notify.week_message(week), tags="calendar")
+
+
 @app.get("/api/summary")
 def summary(file: str):
     path = os.path.join(DATA, os.path.basename(file))
@@ -280,6 +290,20 @@ def notify_phone(file: str):
     except notify.NotifyError as e:
         return JSONResponse({"error": str(e)}, status_code=502)
     return {"ok": True}
+
+
+@app.post("/api/notify_week")
+def notify_week():
+    try:
+        send_week()
+    except notify.NotifyError as e:
+        return JSONResponse({"error": str(e)}, status_code=502)
+    return {"ok": True}
+
+
+@app.get("/api/week")
+def week():
+    return sleepdata.week_summary(DATA)
 
 
 @app.websocket("/ws")

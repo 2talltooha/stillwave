@@ -205,6 +205,42 @@ def build_report(readings):
     }
 
 
+def week_summary(folder="data", days=7, now=None):
+    """Screen-Time-style weekly roll-up of the nights recorded in the last `days` days.
+    A recording counts as a night if it started between 6 pm and 6 am and has an hour or more in bed."""
+    now = now or datetime.now()
+    nights = []
+    for name in list_recordings(folder):
+        readings = load_readings(os.path.join(folder, name))
+        if len(readings) < 2:
+            continue
+        start = readings[0]["t"]
+        if now - start > timedelta(days=days) or not (start.hour >= 18 or start.hour < 6):
+            continue
+        rep = build_report(readings)
+        if rep.get("in_bed_min", 0) < 60:
+            continue
+        label = (start - timedelta(hours=12)).strftime("%a %b %d")      # 2 am Sunday = Saturday night
+        nights.append({"night": label, "start": start.isoformat(timespec="minutes"),
+                       "in_bed_min": rep["in_bed_min"], "asleep_min": rep["asleep_min"],
+                       "breath_avg": rep["breath_avg"], "dip_count": rep["dip_count"]})
+    if not nights:
+        return {"nights": 0}
+    n = len(nights)
+    in_bed = sum(x["in_bed_min"] for x in nights)
+    breaths = [x["breath_avg"] for x in nights if x["breath_avg"]]
+    longest = max(nights, key=lambda x: x["in_bed_min"])
+    return {
+        "nights": n,
+        "avg_in_bed_min": round(in_bed / n),
+        "avg_asleep_min": round(sum(x["asleep_min"] for x in nights) / n),
+        "breath_avg": round(sum(breaths) / len(breaths), 1) if breaths else None,
+        "dips_per_hour": round(sum(x["dip_count"] for x in nights) / (in_bed / 60), 1) if in_bed else None,
+        "longest": longest,
+        "list": sorted(nights, key=lambda x: x["start"]),
+    }
+
+
 def list_recordings(folder="data"):
     if not os.path.isdir(folder):
         return []
