@@ -194,6 +194,7 @@ class Sensor:
                 "events": list(self.events),
                 "in_bed_s": round(now - self.in_bed_since) if self.in_bed_since else 0,
                 "dip_count": self.dip_count,
+                "still_s": round(now - (self.dips.last_move or self.session_start)),
                 "last_dip_ago": round(now - self.last_dip_t) if self.last_dip_t else None,
                 "file": os.path.basename(self.path),
             }

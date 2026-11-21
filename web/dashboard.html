@@ -39,6 +39,23 @@
   .stat.flash { animation: flash 2.5s ease-out; }
   @keyframes flash { 0% { background: rgba(255,107,138,.45); } 100% { background: #0f1426; } }
   .events li.dip { color: var(--dip); }
+  .challenge { grid-column: 1 / -1; display: none; align-items: center; gap: 28px; background: var(--panel);
+               border: 2px solid var(--line); border-radius: 16px; padding: 16px 26px; }
+  .challenge.on { display: flex; }
+  .challenge.hold { border-color: var(--lock); }
+  .challenge.caught { border-color: var(--dip); }
+  .challenge .count { font-size: 64px; font-weight: 800; min-width: 110px; text-align: center; font-variant-numeric: tabular-nums; }
+  .challenge.caught .count { color: var(--dip); }
+  .challenge .msg b { display: block; font-size: 26px; }
+  .challenge .msg span { color: var(--muted); }
+  .bar { height: 6px; width: 360px; background: var(--line); border-radius: 3px; margin-top: 10px; overflow: hidden; }
+  .bar i { display: block; height: 100%; width: 0; background: var(--still); transition: width .3s; }
+  .challenge.hold .bar i { background: var(--lock); }
+  .cancel { margin-left: auto; background: transparent; color: var(--muted); border: 1px solid var(--line);
+            border-radius: 10px; padding: 8px 14px; cursor: pointer; font-size: 14px; }
+  .tryBtn { margin-top: 18px; width: 100%; padding: 14px; border: 0; border-radius: 12px; background: var(--dip);
+            color: #0b1020; font-weight: 800; font-size: 17px; cursor: pointer; }
+  .tally { color: var(--muted); font-size: 13px; margin-top: 8px; text-align: center; min-height: 18px; }
 </style>
 </head>
 <body>
@@ -51,6 +68,12 @@
 </header>
 
 <main>
+  <section class="challenge" id="challenge">
+    <div class="count" id="chCount"></div>
+    <div class="msg"><b id="chTitle"></b><span id="chText"></span><div class="bar" id="chBar"><i id="chFill"></i></div></div>
+    <button class="cancel" id="chCancel">Cancel</button>
+  </section>
+
   <section class="panel">
     <div id="pill" class="pill">EMPTY</div>
     <div class="big" id="rate">--</div>
@@ -68,6 +91,8 @@
       <div class="stat dip" id="dipBox"><b id="dips">0</b><span>breathing dips</span></div>
       <div class="stat"><b id="lastDip">-</b><span>since last dip</span></div>
     </div>
+    <button class="tryBtn" id="tryBtn">Try it: hold your breath</button>
+    <div class="tally" id="tally"></div>
   </section>
 
   <section class="panel">
@@ -146,8 +171,9 @@ function draw(history) {
   }
 }
 
-let lastDipCount = null;
+let lastDipCount = null, snap = null;
 function render(d) {
+  snap = d;
   $("dot").className = "dot" + (d.connected ? " on" : "");
   $("conn").textContent = d.connected ? "sensor live" : "waiting for sensor";
   const L = d.latest || {};
@@ -171,6 +197,68 @@ function render(d) {
     : "<li><time>--</time>No events yet</li>";
   draw(d.history || []);
 }
+
+// ---------- "Try it" breath-hold challenge ----------
+const HOLD_S = 30, WAIT_S = 40, STILL_NEED = 40;   // STILL_NEED matches the dip detector's stillness rule
+const CH = { phase: "idle" };
+
+function readTally() {
+  try { return JSON.parse(localStorage.getItem("sw_tally")) || { tries: 0, caught: 0 }; }
+  catch (e) { return { tries: 0, caught: 0 }; }
+}
+function showTally() {
+  const t = readTally();
+  $("tally").textContent = t.tries ? `Breath holds caught on this device: ${t.caught} of ${t.tries}` : "";
+}
+function chShow(cls, count, title, text, frac) {
+  $("challenge").className = "challenge on " + cls;
+  $("chCount").textContent = count;
+  $("chTitle").textContent = title;
+  $("chText").textContent = text;
+  $("chBar").style.display = frac == null ? "none" : "block";
+  if (frac != null) $("chFill").style.width = Math.round(Math.max(0, Math.min(1, frac)) * 100) + "%";
+}
+function stopChallenge() { CH.phase = "idle"; $("challenge").className = "challenge"; }
+function finish(caught, secs) {
+  const t = readTally(); t.tries++; if (caught) t.caught++;
+  try { localStorage.setItem("sw_tally", JSON.stringify(t)); } catch (e) {}
+  showTally();
+  CH.phase = "done"; CH.doneAt = Date.now();
+  if (caught) chShow("caught", "\u2713", `Caught ${secs} s after you started holding`, "Stillwave flagged a breathing dip. Breathe normally.", null);
+  else chShow("", "\u2013", "Not caught this time", "The radar needs you very still. Sit back, relax and try again.", null);
+}
+function tick() {
+  if (CH.phase === "idle") return;
+  const now = Date.now(), d = snap || {}, L = d.latest || {};
+  if (CH.phase === "ready") {
+    const locked = d.connected && L.breath_rate > 0 && (L.state === "STILL" || L.state === "ASLEEP");
+    const still = Math.min(STILL_NEED, d.still_s || 0);
+    if (locked && still >= STILL_NEED) { CH.phase = "count"; CH.t0 = now; }
+    else chShow("", "", "Get ready",
+      !d.connected ? "Waiting for the sensor..."
+        : !locked ? "Sit facing the sensor and breathe normally until your breathing shows up."
+        : `Sit still and breathe normally... ${STILL_NEED - still} s`,
+      locked ? still / STILL_NEED : 0);
+  }
+  if (CH.phase === "count") {
+    const left = 3 - Math.floor((now - CH.t0) / 1000);
+    if (left <= 0) { CH.phase = "hold"; CH.t0 = now; CH.dips0 = d.dip_count || 0; }
+    else chShow("hold", left, "Breathe out, then hold your breath", "Starting...", null);
+  }
+  if (CH.phase === "hold" || CH.phase === "wait") {
+    const el = (now - CH.t0) / 1000;
+    if ((d.dip_count || 0) > CH.dips0) return finish(true, Math.max(1, Math.round(el)));
+    if (CH.phase === "hold" && el >= HOLD_S) CH.phase = "wait";
+    if (CH.phase === "hold") chShow("hold", Math.ceil(HOLD_S - el), "Hold your breath", "Stay still. Watching for a dip...", el / HOLD_S);
+    else if (el >= HOLD_S + WAIT_S) return finish(false);
+    else chShow("", "", "Breathe normally", "The radar reads breathing every few seconds. Waiting for it to catch up...", (el - HOLD_S) / WAIT_S);
+  }
+  if (CH.phase === "done" && now - CH.doneAt > 12000) stopChallenge();
+}
+setInterval(tick, 250);
+$("tryBtn").onclick = () => { CH.phase = "ready"; tick(); };
+$("chCancel").onclick = stopChallenge;
+showTally();
 
 function connect() {
   const ws = new WebSocket(`ws://${location.host}/ws`);
