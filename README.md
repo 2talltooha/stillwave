@@ -15,9 +15,19 @@ A 60 GHz mmWave radar watches breathing from about a metre away, with nothing wo
 | TX | GPIO 4 |
 | RX | GPIO 5 |
 
+## Run it
+
+1. Upload `firmware/stillwave_esp32/stillwave_esp32.ino` to the ESP32, then close the Arduino IDE.
+2. `pip install -r requirements.txt`
+3. `python server.py`
+4. Open http://localhost:8000 (live) and http://localhost:8000/report (night report).
+
 ## Software
 
 - `firmware/stillwave_esp32/` - main ESP32 program
+- `server.py` - reads the radar, saves `data/session_*.csv`, serves the dashboard and report
+- `sleepdata.py` - live state and night-report calculations
+- `web/` - dashboard and report pages
 - `firmware/sleep_test/` - overnight test of the radar's built-in sleep data
 - `firmware/radar_sniffer/` - test that prints the radar's raw messages
 - `logger.py` - reads the ESP32, saves a CSV, prints the live state
