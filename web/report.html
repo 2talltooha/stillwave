@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stillwave - night report</title>
+<style>
+  :root {
+    --bg: #0b1020; --panel: #141a2e; --line: #263052; --text: #e8ecf8; --muted: #8b95b5;
+    --deep: #5a4bd6; --light: #8b7cff; --awake: #f2a93b; --none: #2a3150; --breath: #2fbf8a; --restless: #f2a93b;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { display: flex; justify-content: space-between; align-items: center; padding: 18px 32px; }
+  header h1 { margin: 0; font-size: 22px; }
+  header a { color: var(--muted); text-decoration: none; }
+  select { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font-size: 15px; }
+  main { padding: 0 32px 28px; max-width: 1200px; }
+  .lead { color: var(--muted); margin: 0 0 18px; }
+  .cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 18px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 16px 18px; }
+  .card b { display: block; font-size: 34px; font-variant-numeric: tabular-nums; }
+  .card span { color: var(--muted); font-size: 13px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 20px; margin-bottom: 18px; }
+  h2 { margin: 0 0 12px; font-size: 14px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; }
+  canvas { width: 100%; display: block; }
+  #stages { height: 70px; }
+  #breathChart { height: 260px; }
+  .legend { display: flex; gap: 18px; color: var(--muted); font-size: 13px; margin-top: 8px; }
+  .legend i { display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; }
+  table { width: 100%; border-collapse: collapse; }
+  td, th { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; }
+  th { color: var(--muted); font-weight: 600; font-size: 13px; }
+  .note { color: var(--muted); font-size: 13px; }
+  .err { color: var(--restless); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Night report</h1>
+  <div><select id="file"></select> &nbsp; <a href="/">&larr; Live</a></div>
+</header>
+
+<main>
+  <p class="lead" id="lead">Pick a recording.</p>
+
+  <div class="cards">
+    <div class="card"><b id="inbed">-</b><span>time in bed</span></div>
+    <div class="card"><b id="asleep">-</b><span>asleep (radar estimate)</span></div>
+    <div class="card"><b id="breath">-</b><span>avg breaths / min</span></div>
+    <div class="card"><b id="restless">-</b><span>restless periods</span></div>
+  </div>
+
+  <div class="panel">
+    <h2>Sleep stages (radar estimate)</h2>
+    <canvas id="stages" height="70"></canvas>
+    <div class="legend">
+      <span><i style="background:var(--awake)"></i>awake</span>
+      <span><i style="background:var(--light)"></i>light</span>
+      <span><i style="background:var(--deep)"></i>deep</span>
+      <span><i style="background:var(--none)"></i>no data / not in bed</span>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Breathing rate through the night</h2>
+    <canvas id="breathChart" height="260"></canvas>
+    <div class="legend">
+      <span><i style="background:var(--breath)"></i>breaths per minute</span>
+      <span><i style="background:var(--restless)"></i>restless period</span>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Restless periods</h2>
+    <table><thead><tr><th>Time</th><th>Length</th></tr></thead><tbody id="rows"></tbody></table>
+  </div>
+
+  <p class="note">Contactless 60 GHz radar, nothing worn. Sleep stages come from the radar's built-in estimate.
+  This is not a diagnosis; sleep clinics use airflow and oxygen sensors.</p>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const hm = m => m >= 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${m}m`;
+const secs = t => { const [h, m, s] = t.split(":").map(Number); return h * 3600 + m * 60 + s; };
+
+function setup(canvas) {
+  const dpr = window.devicePixelRatio || 1, W = canvas.clientWidth, H = canvas.clientHeight;
+  canvas.width = W * dpr; canvas.height = H * dpr;
+  const g = canvas.getContext("2d"); g.scale(dpr, dpr); return [g, W, H];
+}
+
+// seconds since the first point, handling a midnight crossing
+function axis(tl) {
+  let base = secs(tl[0].t), last = 0, offset = 0;
+  return tl.map(p => { let s = secs(p.t) - base + offset; if (s < last - 3600) { offset += 86400; s += 86400; } last = s; return s; });
+}
+
+function drawStages(tl) {
+  const [g, W, H] = setup($("stages"));
+  if (tl.length < 2) return;
+  const xs = axis(tl), total = xs[xs.length - 1] || 1, colors = { deep: "--deep", light: "--light", awake: "--awake", none: "--none" };
+  const rowY = { awake: 0, light: 1, deep: 2, none: 1 };
+  const bandH = (H - 20) / 3;
+  for (let i = 0; i < tl.length - 1; i++) {
+    const x0 = xs[i] / total * W, x1 = xs[i + 1] / total * W;
+    const stage = tl[i].state === "EMPTY" ? "none" : tl[i].sleep;
+    g.fillStyle = css(colors[stage] || "--none");
+    g.fillRect(x0, rowY[stage] * bandH, Math.max(1, x1 - x0), bandH - 2);
+  }
+  g.fillStyle = css("--muted"); g.font = "12px system-ui";
+  g.fillText(tl[0].t.slice(0, 5), 0, H - 4);
+  g.fillText(tl[tl.length - 1].t.slice(0, 5), W - 36, H - 4);
+}
+
+function drawBreath(tl) {
+  const [g, W, H] = setup($("breathChart"));
+  if (tl.length < 2) return;
+  const xs = axis(tl), total = xs[xs.length - 1] || 1;
+  const pad = { l: 34, r: 8, t: 8, b: 22 }, minR = 5, maxR = 30;
+  const X = s => pad.l + s / total * (W - pad.l - pad.r);
+  const Y = r => pad.t + (1 - (r - minR) / (maxR - minR)) * (H - pad.t - pad.b);
+
+  g.strokeStyle = css("--line"); g.fillStyle = css("--muted"); g.font = "12px system-ui";
+  for (const r of [10, 15, 20, 25]) { g.beginPath(); g.moveTo(pad.l, Y(r)); g.lineTo(W - pad.r, Y(r)); g.stroke(); g.fillText(r, 6, Y(r) + 4); }
+
+  // restless shading
+  g.fillStyle = "rgba(242,169,59,.22)";
+  tl.forEach((p, i) => { if (p.state === "RESTLESS" && i < tl.length - 1) g.fillRect(X(xs[i]), pad.t, Math.max(2, X(xs[i + 1]) - X(xs[i])), H - pad.t - pad.b); });
+
+  g.strokeStyle = css("--breath"); g.lineWidth = 2; g.beginPath();
+  let on = false;
+  tl.forEach((p, i) => {
+    if (!p.rate || p.state === "EMPTY") { on = false; return; }
+    const x = X(xs[i]), y = Y(Math.max(minR, Math.min(maxR, p.rate)));
+    on ? g.lineTo(x, y) : g.moveTo(x, y); on = true;
+  });
+  g.stroke();
+
+  g.fillStyle = css("--muted");
+  const n = 5;
+  for (let k = 0; k <= n; k++) {
+    const i = Math.round(k / n * (tl.length - 1));
+    g.fillText(tl[i].t.slice(0, 5), Math.min(X(xs[i]) - 14, W - 36), H - 4);
+  }
+}
+
+async function load(file) {
+  const r = await fetch(`/api/report?file=${encodeURIComponent(file)}`).then(x => x.json());
+  if (r.error) {
+    $("lead").innerHTML = `<span class="err">${r.error}</span>`;
+    drawStages([]); drawBreath([]);
+    return false;
+  }
+  $("lead").textContent = `${r.start} to ${r.end}  ·  ${hm(r.recorded_min)} recorded  ·  breathing ${r.breath_low ?? "-"}–${r.breath_high ?? "-"} per minute`;
+  $("inbed").textContent = hm(r.in_bed_min);
+  $("asleep").textContent = `${hm(r.asleep_min)}`;
+  $("breath").textContent = r.breath_avg ?? "-";
+  $("restless").textContent = r.restless_count;
+  $("rows").innerHTML = r.restless_periods.length
+    ? r.restless_periods.map(p => `<tr><td>${p.start}</td><td>${p.seconds} s</td></tr>`).join("")
+    : `<tr><td colspan="2">None</td></tr>`;
+  drawStages(r.timeline);
+  drawBreath(r.timeline);
+  return true;
+}
+
+(async () => {
+  const files = await fetch("/api/recordings").then(x => x.json());
+  $("file").innerHTML = files.map(f => `<option>${f}</option>`).join("");
+  if (!files.length) { $("lead").textContent = "No recordings in the data folder yet."; return; }
+  // open the newest recording that actually has data
+  for (const f of files) {
+    if (await load(f)) { $("file").value = f; break; }
+  }
+  $("file").onchange = e => load(e.target.value);
+})();
+</script>
+</body>
+</html>

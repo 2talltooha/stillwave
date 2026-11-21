@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stillwave - live</title>
+<style>
+  :root {
+    --bg: #0b1020; --panel: #141a2e; --line: #263052; --text: #e8ecf8; --muted: #8b95b5;
+    --empty: #5b6584; --lock: #4c8dff; --still: #2fbf8a; --asleep: #8b7cff; --restless: #f2a93b;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 16px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { display: flex; justify-content: space-between; align-items: center; padding: 18px 32px; }
+  header h1 { margin: 0; font-size: 22px; letter-spacing: .5px; }
+  header a { color: var(--muted); text-decoration: none; margin-left: 18px; }
+  .conn { color: var(--muted); font-size: 14px; }
+  .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: #c0392b; margin-right: 6px; }
+  .dot.on { background: var(--still); }
+  main { display: grid; grid-template-columns: 380px 1fr; gap: 20px; padding: 0 32px 24px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 22px; }
+  .pill { display: inline-block; padding: 10px 22px; border-radius: 999px; font-weight: 700;
+          font-size: 22px; letter-spacing: 1px; background: var(--empty); transition: background .4s; }
+  .big { font-size: 112px; font-weight: 800; line-height: 1; margin: 26px 0 4px; font-variant-numeric: tabular-nums; }
+  .unit { color: var(--muted); font-size: 18px; }
+  .row { display: flex; gap: 14px; margin-top: 26px; }
+  .stat { flex: 1; background: #0f1426; border-radius: 12px; padding: 14px; }
+  .stat b { display: block; font-size: 28px; font-variant-numeric: tabular-nums; }
+  .stat span { color: var(--muted); font-size: 13px; }
+  h2 { margin: 0 0 12px; font-size: 15px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 1px; }
+  canvas { width: 100%; height: 300px; display: block; }
+  .events { list-style: none; margin: 0; padding: 0; max-height: 210px; overflow: auto; }
+  .events li { padding: 8px 0; border-bottom: 1px solid var(--line); display: flex; gap: 14px; }
+  .events time { color: var(--muted); font-variant-numeric: tabular-nums; }
+  footer { color: var(--muted); font-size: 13px; padding: 0 32px 20px; }
+  .waiting { color: var(--restless); font-size: 14px; margin-top: 10px; min-height: 20px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Stillwave</h1>
+  <div>
+    <span class="conn"><span id="dot" class="dot"></span><span id="conn">waiting for sensor</span></span>
+    <a href="/report">Night report &rarr;</a>
+  </div>
+</header>
+
+<main>
+  <section class="panel">
+    <div id="pill" class="pill">EMPTY</div>
+    <div class="big" id="rate">--</div>
+    <div class="unit">breaths per minute</div>
+    <div class="waiting" id="hint"></div>
+    <div class="row">
+      <div class="stat"><b id="inbed">0:00</b><span>time in bed</span></div>
+      <div class="stat"><b id="sleep">-</b><span>radar sleep state</span></div>
+    </div>
+    <div class="row">
+      <div class="stat"><b id="heart">--</b><span>heart rate (estimate)</span></div>
+      <div class="stat"><b id="move">--</b><span>movement (0-100)</span></div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Breathing, last 10 minutes</h2>
+    <canvas id="chart"></canvas>
+    <h2 style="margin-top:22px">Events</h2>
+    <ul class="events" id="events"><li><time>--</time>No events yet</li></ul>
+  </section>
+</main>
+
+<footer>Contactless: 60 GHz radar, nothing worn, no camera. Not a medical device.</footer>
+
+<script>
+const COLORS = { "EMPTY": "--empty", "LOCKING ON": "--lock", "STILL": "--still",
+                 "ASLEEP": "--asleep", "RESTLESS": "--restless" };
+const HINTS = { "EMPTY": "Sit or lie about 1 m in front of the sensor.",
+                "LOCKING ON": "Stay still - finding your breathing (10-60 s).",
+                "RESTLESS": "Movement hides breathing; it settles once you're still." };
+const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const $ = id => document.getElementById(id);
+
+function fmtDuration(s) {
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  return h ? `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}` : `${m}:${String(sec).padStart(2, "0")}`;
+}
+
+function draw(history) {
+  const c = $("chart"), dpr = window.devicePixelRatio || 1;
+  const W = c.clientWidth, H = c.clientHeight;
+  c.width = W * dpr; c.height = H * dpr;
+  const g = c.getContext("2d"); g.scale(dpr, dpr); g.clearRect(0, 0, W, H);
+
+  const pad = { l: 40, r: 10, t: 10, b: 60 };
+  const span = 600, minR = 5, maxR = 30;
+  const x = ago => pad.l + (1 - ago / span) * (W - pad.l - pad.r);
+  const y = r => pad.t + (1 - (r - minR) / (maxR - minR)) * (H - pad.t - pad.b);
+
+  // grid + labels
+  g.strokeStyle = css("--line"); g.fillStyle = css("--muted"); g.font = "12px system-ui"; g.lineWidth = 1;
+  for (const r of [10, 15, 20, 25]) {
+    g.beginPath(); g.moveTo(pad.l, y(r)); g.lineTo(W - pad.r, y(r)); g.stroke();
+    g.fillText(r, 8, y(r) + 4);
+  }
+  for (const m of [10, 8, 6, 4, 2, 0]) g.fillText(m ? `-${m} min` : "now", x(m * 60) - 18, H - 8);
+
+  const pts = history.filter(p => p.ago <= span);
+
+  // movement bars along the bottom
+  const barTop = H - pad.b + 8, barH = 26;
+  for (const p of pts) {
+    const h = Math.min(1, p.move / 100) * barH;
+    g.fillStyle = p.move > 40 ? css("--restless") : css("--line");
+    g.fillRect(x(p.ago) - 1, barTop + barH - h, 3, h);
+  }
+
+  // breathing line
+  g.strokeStyle = css("--still"); g.lineWidth = 3; g.lineJoin = "round"; g.beginPath();
+  let started = false;
+  for (const p of pts) {
+    if (!p.rate) { started = false; continue; }
+    const X = x(p.ago), Y = y(Math.max(minR, Math.min(maxR, p.rate)));
+    started ? g.lineTo(X, Y) : g.moveTo(X, Y);
+    started = true;
+  }
+  g.stroke();
+}
+
+function render(d) {
+  $("dot").className = "dot" + (d.connected ? " on" : "");
+  $("conn").textContent = d.connected ? "sensor live" : "waiting for sensor";
+  const L = d.latest || {};
+  const state = d.connected ? (L.state || "EMPTY") : "EMPTY";
+  $("pill").textContent = state;
+  $("pill").style.background = css(COLORS[state] || "--empty");
+  $("rate").textContent = d.connected && L.breath_rate ? L.breath_rate : "--";
+  $("heart").textContent = d.connected && L.heart_rate ? L.heart_rate : "--";
+  $("move").textContent = d.connected && L.moving_range !== undefined ? L.moving_range : "--";
+  $("sleep").textContent = d.connected && L.sleep ? L.sleep : "-";
+  $("inbed").textContent = fmtDuration(d.in_bed_s || 0);
+  $("hint").textContent = d.connected ? (HINTS[state] || "") : "Plug in the sensor and close the Arduino IDE.";
+  $("events").innerHTML = (d.events && d.events.length)
+    ? d.events.map(([t, txt]) => `<li><time>${t}</time>${txt}</li>`).join("")
+    : "<li><time>--</time>No events yet</li>";
+  draw(d.history || []);
+}
+
+function connect() {
+  const ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onmessage = e => render(JSON.parse(e.data));
+  ws.onclose = () => { $("conn").textContent = "server stopped - reconnecting"; setTimeout(connect, 2000); };
+}
+connect();
+window.addEventListener("resize", () => draw([]));
+</script>
+</body>
+</html>
