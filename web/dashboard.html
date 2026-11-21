@@ -7,7 +7,7 @@
 <style>
   :root {
     --bg: #0b1020; --panel: #141a2e; --line: #263052; --text: #e8ecf8; --muted: #8b95b5;
-    --empty: #5b6584; --lock: #4c8dff; --still: #2fbf8a; --asleep: #8b7cff; --restless: #f2a93b;
+    --empty: #5b6584; --lock: #4c8dff; --still: #2fbf8a; --asleep: #8b7cff; --restless: #f2a93b; --dip: #ff6b8a;
   }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--text);
@@ -35,6 +35,10 @@
   .events time { color: var(--muted); font-variant-numeric: tabular-nums; }
   footer { color: var(--muted); font-size: 13px; padding: 0 32px 20px; }
   .waiting { color: var(--restless); font-size: 14px; margin-top: 10px; min-height: 20px; }
+  .stat.dip b { color: var(--dip); }
+  .stat.flash { animation: flash 2.5s ease-out; }
+  @keyframes flash { 0% { background: rgba(255,107,138,.45); } 100% { background: #0f1426; } }
+  .events li.dip { color: var(--dip); }
 </style>
 </head>
 <body>
@@ -60,6 +64,10 @@
       <div class="stat"><b id="heart">--</b><span>heart rate (estimate)</span></div>
       <div class="stat"><b id="move">--</b><span>movement (0-100)</span></div>
     </div>
+    <div class="row">
+      <div class="stat dip" id="dipBox"><b id="dips">0</b><span>breathing dips</span></div>
+      <div class="stat"><b id="lastDip">-</b><span>since last dip</span></div>
+    </div>
   </section>
 
   <section class="panel">
@@ -70,7 +78,8 @@
   </section>
 </main>
 
-<footer>Contactless: 60 GHz radar, nothing worn, no camera. Not a medical device.</footer>
+<footer>Contactless: 60 GHz radar, nothing worn, no camera. A breathing dip is a sharp slow-down in breathing:
+a pause looks like one, but so do normal changes. Not a medical device.</footer>
 
 <script>
 const COLORS = { "EMPTY": "--empty", "LOCKING ON": "--lock", "STILL": "--still",
@@ -125,8 +134,19 @@ function draw(history) {
     started = true;
   }
   g.stroke();
+
+  // breathing dips
+  g.font = "bold 12px system-ui";
+  for (const p of pts) {
+    if (!p.dip) continue;
+    const X = x(p.ago);
+    g.strokeStyle = css("--dip"); g.lineWidth = 2; g.setLineDash([5, 4]);
+    g.beginPath(); g.moveTo(X, pad.t + 14); g.lineTo(X, H - pad.b); g.stroke(); g.setLineDash([]);
+    g.fillStyle = css("--dip"); g.fillText("dip", X - 9, pad.t + 10);
+  }
 }
 
+let lastDipCount = null;
 function render(d) {
   $("dot").className = "dot" + (d.connected ? " on" : "");
   $("conn").textContent = d.connected ? "sensor live" : "waiting for sensor";
@@ -139,9 +159,15 @@ function render(d) {
   $("move").textContent = d.connected && L.moving_range !== undefined ? L.moving_range : "--";
   $("sleep").textContent = d.connected && L.sleep ? L.sleep : "-";
   $("inbed").textContent = fmtDuration(d.in_bed_s || 0);
+  $("dips").textContent = d.dip_count || 0;
+  $("lastDip").textContent = d.last_dip_ago != null ? fmtDuration(d.last_dip_ago) : "-";
+  if (lastDipCount !== null && d.dip_count > lastDipCount) {
+    const box = $("dipBox"); box.classList.remove("flash"); void box.offsetWidth; box.classList.add("flash");
+  }
+  lastDipCount = d.dip_count || 0;
   $("hint").textContent = d.connected ? (HINTS[state] || "") : "Plug in the sensor and close the Arduino IDE.";
   $("events").innerHTML = (d.events && d.events.length)
-    ? d.events.map(([t, txt]) => `<li><time>${t}</time>${txt}</li>`).join("")
+    ? d.events.map(([t, txt]) => `<li class="${txt.startsWith("Breathing dip") ? "dip" : ""}"><time>${t}</time>${txt}</li>`).join("")
     : "<li><time>--</time>No events yet</li>";
   draw(d.history || []);
 }

@@ -7,7 +7,7 @@
 <style>
   :root {
     --bg: #0b1020; --panel: #141a2e; --line: #263052; --text: #e8ecf8; --muted: #8b95b5;
-    --deep: #5a4bd6; --light: #8b7cff; --awake: #f2a93b; --none: #2a3150; --breath: #2fbf8a; --restless: #f2a93b;
+    --deep: #5a4bd6; --light: #8b7cff; --awake: #f2a93b; --none: #2a3150; --breath: #2fbf8a; --restless: #f2a93b; --dip: #ff6b8a;
   }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--text);
@@ -18,7 +18,7 @@
   select { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font-size: 15px; }
   main { padding: 0 32px 28px; max-width: 1200px; }
   .lead { color: var(--muted); margin: 0 0 18px; }
-  .cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 18px; }
+  .cards { display: grid; grid-template-columns: repeat(5, 1fr); gap: 14px; margin-bottom: 18px; }
   .card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 16px 18px; }
   .card b { display: block; font-size: 34px; font-variant-numeric: tabular-nums; }
   .card span { color: var(--muted); font-size: 13px; }
@@ -34,6 +34,9 @@
   th { color: var(--muted); font-weight: 600; font-size: 13px; }
   .note { color: var(--muted); font-size: 13px; }
   .err { color: var(--restless); }
+  .card.dip b { color: var(--dip); }
+  .card small { color: var(--muted); font-size: 14px; font-weight: 400; }
+  td.dip { color: var(--dip); }
 </style>
 </head>
 <body>
@@ -50,6 +53,7 @@
     <div class="card"><b id="asleep">-</b><span>asleep (radar estimate)</span></div>
     <div class="card"><b id="breath">-</b><span>avg breaths / min</span></div>
     <div class="card"><b id="restless">-</b><span>restless periods</span></div>
+    <div class="card dip"><b id="dips">-</b><span>breathing dips</span></div>
   </div>
 
   <div class="panel">
@@ -69,15 +73,19 @@
     <div class="legend">
       <span><i style="background:var(--breath)"></i>breaths per minute</span>
       <span><i style="background:var(--restless)"></i>restless period</span>
+      <span><i style="background:var(--dip)"></i>breathing dip</span>
     </div>
   </div>
 
   <div class="panel">
-    <h2>Restless periods</h2>
-    <table><thead><tr><th>Time</th><th>Length</th></tr></thead><tbody id="rows"></tbody></table>
+    <h2>Events</h2>
+    <table><thead><tr><th>Time</th><th>What</th><th>Detail</th></tr></thead><tbody id="rows"></tbody></table>
   </div>
 
   <p class="note">Contactless 60 GHz radar, nothing worn. Sleep stages come from the radar's built-in estimate.
+  A breathing dip is a sharp slow-down in breathing while you were still. A pause in breathing looks like a dip,
+  but so do normal changes during sleep, so dips are not an apnea count. In testing, Stillwave caught 7 of 7
+  deliberate breath holds and logged about 5 dips an hour in a normal night.
   This is not a diagnosis; sleep clinics use airflow and oxygen sensors.</p>
 </main>
 
@@ -140,6 +148,14 @@ function drawBreath(tl) {
   });
   g.stroke();
 
+  // breathing dips
+  g.strokeStyle = css("--dip"); g.lineWidth = 1.5; g.setLineDash([4, 4]);
+  tl.forEach((p, i) => {
+    if (!p.dip) return;
+    g.beginPath(); g.moveTo(X(xs[i]), pad.t); g.lineTo(X(xs[i]), H - pad.b); g.stroke();
+  });
+  g.setLineDash([]);
+
   g.fillStyle = css("--muted");
   const n = 5;
   for (let k = 0; k <= n; k++) {
@@ -160,9 +176,18 @@ async function load(file) {
   $("asleep").textContent = `${hm(r.asleep_min)}`;
   $("breath").textContent = r.breath_avg ?? "-";
   $("restless").textContent = r.restless_count;
-  $("rows").innerHTML = r.restless_periods.length
-    ? r.restless_periods.map(p => `<tr><td>${p.start}</td><td>${p.seconds} s</td></tr>`).join("")
-    : `<tr><td colspan="2">None</td></tr>`;
+  $("dips").innerHTML = r.dips_per_hour != null
+    ? `${r.dip_count} <small>(${r.dips_per_hour}/h)</small>` : r.dip_count;
+  const events = [
+    ...r.restless_periods.map(p => ({ t: p.start, html: `<td>${p.start}</td><td>Restless</td><td>${p.seconds} s</td>` })),
+    ...r.dips.map(p => ({ t: p.t, html: `<td>${p.t}</td><td class="dip">Breathing dip</td><td>rate fell by ${p.drop}/min</td>` })),
+  ];
+  const base = secs(r.timeline[0].t);
+  const key = t => { const v = secs(t); return v < base - 60 ? v + 86400 : v; };   // past midnight
+  events.sort((a, b) => key(a.t) - key(b.t));
+  $("rows").innerHTML = events.length
+    ? events.map(e => `<tr>${e.html}</tr>`).join("")
+    : `<tr><td colspan="3">None</td></tr>`;
   drawStages(r.timeline);
   drawBreath(r.timeline);
   return true;
