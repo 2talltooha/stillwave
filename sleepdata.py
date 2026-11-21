@@ -8,11 +8,50 @@ Reads two file formats:
 
 import csv
 import os
+from collections import deque
 from datetime import datetime, timedelta
 
 RESTLESS_THRESHOLD = 40     # radar moving_range above this = restless
 RESTLESS_HOLD_S = 10        # stay "restless" this long after the last big movement
 SLEEP_NAMES = {0: "deep", 1: "light", 2: "awake", 3: "none"}
+
+# Breathing dips: the radar's breathing rate falls by DIP_DROP or more within DIP_WINDOW_S,
+# while the person has been still for DIP_STILL_S (movement throws off the radar's breathing estimate).
+# A breath hold or pause looks like this, but so do normal slow-downs, so this is NOT an apnea count.
+# Tuned on 21 Nov recordings: caught 7 of 7 deliberate 25-40 s breath holds (and an 8th live test) (fired 15 s before to
+# 35 s after), and fired about 5 times an hour during an hour of normal sleep (no holds).
+DIP_DROP = 6            # breaths per minute
+DIP_WINDOW_S = 30
+DIP_GAP_S = 60          # dips closer together than this count once
+DIP_STILL_S = 40        # ignore dips within this long after movement
+DIP_STILL_MAX = 15      # radar moving_range above this counts as movement
+
+
+class DipDetector:
+    """Feed it readings in time order; update() returns the size of the drop when a new dip starts."""
+
+    def __init__(self):
+        self.recent = deque()       # (seconds, rate) of locked readings in the last DIP_WINDOW_S
+        self.last_dip = None
+        self.last_move = None
+
+    def update(self, t, rate, breath_state, moving_range=0):
+        """t: seconds (any origin). breath_state 1 = radar has locked onto breathing."""
+        if moving_range > DIP_STILL_MAX:
+            self.last_move = t
+        if breath_state != 1 or rate <= 0:
+            return None
+        while self.recent and t - self.recent[0][0] > DIP_WINDOW_S:
+            self.recent.popleft()
+        hit = None
+        still = self.last_move is None or t - self.last_move > DIP_STILL_S
+        if self.recent and still:
+            drop = max(r for _, r in self.recent) - rate
+            if drop >= DIP_DROP and (self.last_dip is None or t - self.last_dip > DIP_GAP_S):
+                self.last_dip = t
+                hit = drop
+        self.recent.append((t, rate))
+        return hit
 
 
 def live_state(presence, moving_range, breath_rate, sleep_state, last_big_move_age):
@@ -31,8 +70,8 @@ def live_state(presence, moving_range, breath_rate, sleep_state, last_big_move_a
 # ---------- loading ----------
 
 def load_readings(path):
-    """Returns a list of dicts with: t (datetime), presence, moving_range, breath_rate,
-    heart_rate, in_bed, sleep_state. Works for both file formats."""
+    """Returns a list of dicts with: t (datetime), presence, moving_range, breath_state,
+    breath_rate, heart_rate, in_bed, sleep_state. Works for both file formats."""
     if path.endswith(".csv"):
         return _load_session_csv(path)
     return _load_night_txt(path)
@@ -49,6 +88,7 @@ def _load_session_csv(path):
                     "t": datetime.fromisoformat(row["wall_time"]),
                     "presence": int(row["presence"]),
                     "moving_range": int(row["moving_range"]),
+                    "breath_state": int(row["breath_state"]),
                     "breath_rate": int(row["breath_rate"]),
                     "heart_rate": int(row["heart_rate"]),
                     "in_bed": int(row["in_bed"]),
@@ -76,7 +116,7 @@ def _load_night_txt(path):
                 continue
             try:
                 hh, mm, ss = map(int, parts[0].split(":"))
-                _, in_bed, sstate, _bstate, brate, hr, mrange = map(int, parts[2:9])
+                _, in_bed, sstate, bstate, brate, hr, mrange = map(int, parts[2:9])
             except ValueError:
                 continue
             t = day + timedelta(hours=hh, minutes=mm, seconds=ss)
@@ -84,7 +124,8 @@ def _load_night_txt(path):
                 day += timedelta(days=1)
                 t += timedelta(days=1)
             prev = t
-            out.append({"t": t, "presence": in_bed, "moving_range": mrange, "breath_rate": brate,
+            out.append({"t": t, "presence": in_bed, "moving_range": mrange, "breath_state": bstate,
+                        "breath_rate": brate,
                         "heart_rate": hr, "in_bed": in_bed, "sleep_state": sstate})
     return out
 
@@ -101,6 +142,8 @@ def build_report(readings):
     restless = []            # list of [start, end]
     last_big = None
     timeline = []            # one point per reading for the charts
+    dips = []
+    detector = DipDetector()
 
     for a, b in zip(readings, readings[1:]):
         dt = (b["t"] - a["t"]).total_seconds()
@@ -119,6 +162,9 @@ def build_report(readings):
                 restless.append([r["t"], r["t"]])
             last_big = r["t"]
         age = (r["t"] - last_big).total_seconds() if last_big else None
+        drop = detector.update(r["t"].timestamp(), r["breath_rate"], r.get("breath_state", 1), r["moving_range"])
+        if drop:
+            dips.append({"t": r["t"].strftime("%H:%M:%S"), "drop": drop})
         timeline.append({
             "t": r["t"].strftime("%H:%M:%S"),
             "rate": r["breath_rate"] or None,
@@ -126,6 +172,7 @@ def build_report(readings):
             "state": live_state(r["presence"], r["moving_range"], r["breath_rate"], r["sleep_state"], age),
             "sleep": SLEEP_NAMES.get(r["sleep_state"], "none"),
             "move": r["moving_range"],
+            "dip": drop or 0,
         })
 
     rates = [r["breath_rate"] for r in readings if r["breath_rate"] > 0 and r["presence"] == 1]
@@ -149,6 +196,9 @@ def build_report(readings):
         "breath_low": rates_sorted[len(rates_sorted) // 20] if rates else None,     # 5th percentile
         "breath_high": rates_sorted[-1 - len(rates_sorted) // 20] if rates else None,  # 95th percentile
         "restless_count": len(restless),
+        "dip_count": len(dips),
+        "dips_per_hour": round(len(dips) / (in_bed_s / 3600), 1) if in_bed_s >= 600 else None,
+        "dips": dips,
         "restless_periods": [{"start": s.strftime("%H:%M:%S"),
                               "seconds": max(5, round((e - s).total_seconds()))} for s, e in restless],
         "timeline": timeline,

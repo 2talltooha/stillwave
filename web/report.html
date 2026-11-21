@@ -37,6 +37,13 @@
   .card.dip b { color: var(--dip); }
   .card small { color: var(--muted); font-size: 14px; font-weight: 400; }
   td.dip { color: var(--dip); }
+  .summary { border-left: 4px solid var(--light); }
+  .summary p { margin: 0 0 12px; font-size: 17px; line-height: 1.55; white-space: pre-wrap; }
+  .summary button { background: var(--light); color: #0b1020; border: 0; border-radius: 10px; padding: 10px 18px;
+                    font-size: 15px; font-weight: 700; cursor: pointer; }
+  .summary button:disabled { opacity: .6; cursor: wait; }
+  .summary button.secondary { background: transparent; color: var(--text); border: 1px solid var(--line); margin-left: 8px; }
+  #phoneStatus { margin-left: 12px; }
 </style>
 </head>
 <body>
@@ -54,6 +61,14 @@
     <div class="card"><b id="breath">-</b><span>avg breaths / min</span></div>
     <div class="card"><b id="restless">-</b><span>restless periods</span></div>
     <div class="card dip"><b id="dips">-</b><span>breathing dips</span></div>
+  </div>
+
+  <div class="panel summary">
+    <h2>Night summary</h2>
+    <p id="summaryText" class="note">A short plain-language summary of this recording, written by Gemini from the numbers on this page.</p>
+    <button id="summaryBtn">Summarize with Gemini</button>
+    <button id="phoneBtn" class="secondary">Send to my phone</button>
+    <span id="phoneStatus" class="note"></span>
   </div>
 
   <div class="panel">
@@ -84,7 +99,7 @@
 
   <p class="note">Contactless 60 GHz radar, nothing worn. Sleep stages come from the radar's built-in estimate.
   A breathing dip is a sharp slow-down in breathing while you were still. A pause in breathing looks like a dip,
-  but so do normal changes during sleep, so dips are not an apnea count. In testing, Stillwave caught 7 of 7
+  but so do normal changes during sleep, so dips are not an apnea count. In testing, Stillwave caught 8 of 8
   deliberate breath holds and logged about 5 dips an hour in a normal night.
   This is not a diagnosis; sleep clinics use airflow and oxygen sensors.</p>
 </main>
@@ -164,7 +179,43 @@ function drawBreath(tl) {
   }
 }
 
+function resetSummary() {
+  $("summaryText").className = "note";
+  $("summaryText").textContent = "A short plain-language summary of this recording, written by Gemini from the numbers on this page.";
+  $("summaryBtn").disabled = false;
+  $("summaryBtn").textContent = "Summarize with Gemini";
+}
+
+async function summarize() {
+  const btn = $("summaryBtn"), out = $("summaryText");
+  btn.disabled = true; btn.textContent = "Asking Gemini...";
+  try {
+    const r = await fetch(`/api/summary?file=${encodeURIComponent($("file").value)}`).then(x => x.json());
+    if (r.error) { out.className = "note err"; out.textContent = r.error; btn.disabled = false; btn.textContent = "Try again"; return; }
+    out.className = ""; out.textContent = r.text;
+    btn.textContent = `Written by ${r.model} · not medical advice`;
+  } catch (e) {
+    out.className = "note err"; out.textContent = "The server didn't answer. Is it running?";
+    btn.disabled = false; btn.textContent = "Try again";
+  }
+}
+
+async function sendToPhone() {
+  const btn = $("phoneBtn"), st = $("phoneStatus");
+  btn.disabled = true; st.className = "note"; st.textContent = "Sending...";
+  try {
+    const r = await fetch(`/api/notify?file=${encodeURIComponent($("file").value)}`, { method: "POST" }).then(x => x.json());
+    if (r.error) { st.className = "note err"; st.textContent = r.error; }
+    else { st.textContent = "Sent. Check your phone."; }
+  } catch (e) {
+    st.className = "note err"; st.textContent = "The server didn't answer. Is it running?";
+  }
+  btn.disabled = false;
+}
+
 async function load(file) {
+  resetSummary();
+  $("phoneStatus").textContent = "";
   const r = await fetch(`/api/report?file=${encodeURIComponent(file)}`).then(x => x.json());
   if (r.error) {
     $("lead").innerHTML = `<span class="err">${r.error}</span>`;
@@ -202,6 +253,8 @@ async function load(file) {
     if (await load(f)) { $("file").value = f; break; }
   }
   $("file").onchange = e => load(e.target.value);
+  $("summaryBtn").onclick = summarize;
+  $("phoneBtn").onclick = sendToPhone;
 })();
 </script>
 </body>

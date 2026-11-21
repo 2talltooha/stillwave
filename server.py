@@ -24,6 +24,8 @@ import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 
+import night_summary
+import notify
 import sleepdata
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -50,11 +52,17 @@ class Sensor:
         self.last_big_move_t = None
         self.latest = {}
         self.summary = {}
-        self.history = deque()          # (unix_t, breath_rate, heart_rate, moving_range, state)
+        self.history = deque()          # (unix_t, breath_rate, heart_rate, moving_range, state, dip)
         self.events = deque(maxlen=30)  # (clock, text)
         self.prev_state = None
         self.session_start = time.time()
         self.in_bed_since = None
+        self.dips = sleepdata.DipDetector()
+        self.dip_count = 0
+        self.last_dip_t = None
+        self.empty_since = None         # for the automatic morning notification
+        self.morning_checked = False
+        self.morning_sent = False
 
     def _port(self):
         for p in serial.tools.list_ports.comports():
@@ -102,6 +110,7 @@ class Sensor:
                 self.last_big_move_t = now
             age = now - self.last_big_move_t if self.last_big_move_t else None
             state = sleepdata.live_state(presence, mrange, brate, sstate, age)
+            dip = self.dips.update(now, brate, bstate, mrange)
             self.w.writerow(["R", wall, esp_ms, presence, movement, mrange, bstate, brate, hr, in_bed, sstate, ""])
             self.f.flush()
             with self.lock:
@@ -109,10 +118,16 @@ class Sensor:
                 self.latest = {"presence": presence, "moving_range": mrange, "breath_rate": brate,
                                "heart_rate": hr, "in_bed": in_bed,
                                "sleep": sleepdata.SLEEP_NAMES.get(sstate, "none"), "state": state}
-                self.history.append((now, brate, hr, mrange, state))
+                self.history.append((now, brate, hr, mrange, state, dip or 0))
                 while self.history and now - self.history[0][0] > 15 * 60:
                     self.history.popleft()
                 self._track_events(now, state, presence)
+                self._check_morning(now, presence)
+                if dip:
+                    self.dip_count += 1
+                    self.last_dip_t = now
+                    self.events.appendleft((datetime.now().strftime("%H:%M:%S"),
+                                            f"Breathing dip (rate fell by {dip}/min)"))
 
         elif parts[0] == "C" and len(nums) == 9:
             _, pres, sstate, avg_r, avg_h, turns, large, minor, apneas = nums
@@ -123,6 +138,33 @@ class Sensor:
             with self.lock:
                 self.summary = {"avg_resp": avg_r, "avg_heart": avg_h, "turnovers": turns,
                                 "large_moves": large, "minor_moves": minor, "apneas": apneas}
+
+    def _check_morning(self, now, presence):
+        """Out of bed for 10 min after a real night -> send the night summary to the phone, once."""
+        if presence == 1:
+            self.empty_since = None
+            self.morning_checked = False
+            return
+        if self.empty_since is None:
+            self.empty_since = now
+        if (not self.morning_checked and not self.morning_sent
+                and now - self.empty_since >= notify.MORNING_EMPTY_S and notify.topic()):
+            self.morning_checked = True
+            threading.Thread(target=self._send_morning, daemon=True).start()
+
+    def _send_morning(self):
+        rep = sleepdata.build_report(sleepdata.load_readings(self.path))
+        if rep.get("in_bed_min", 0) < notify.MORNING_MIN_IN_BED:
+            return                      # a short test, not a night
+        clock = datetime.now().strftime("%H:%M:%S")
+        try:
+            send_night(self.path, "Stillwave - last night")
+            text = "Morning summary sent to your phone"
+            self.morning_sent = True
+        except notify.NotifyError as e:
+            text = f"Couldn't send the morning summary: {e}"
+        with self.lock:
+            self.events.appendleft((clock, text))
 
     def _track_events(self, now, state, presence):
         clock = datetime.now().strftime("%H:%M:%S")
@@ -142,8 +184,8 @@ class Sensor:
         with self.lock:
             now = time.time()
             stale = self.last_reading_t is None or now - self.last_reading_t > 20
-            hist = [{"ago": round(now - t), "rate": r or None, "heart": h or None, "move": m, "state": s}
-                    for t, r, h, m, s in self.history]
+            hist = [{"ago": round(now - t), "rate": r or None, "heart": h or None, "move": m, "state": s, "dip": d}
+                    for t, r, h, m, s, d in self.history]
             return {
                 "connected": self.connected and not stale,
                 "latest": self.latest,
@@ -151,6 +193,8 @@ class Sensor:
                 "history": hist,
                 "events": list(self.events),
                 "in_bed_s": round(now - self.in_bed_since) if self.in_bed_since else 0,
+                "dip_count": self.dip_count,
+                "last_dip_ago": round(now - self.last_dip_t) if self.last_dip_t else None,
                 "file": os.path.basename(self.path),
             }
 
@@ -188,6 +232,55 @@ def report(file: str):
     return sleepdata.build_report(sleepdata.load_readings(path))
 
 
+_summaries = {}     # (file, size) -> summary, so Gemini isn't asked twice about the same data
+
+
+def gemini_summary(path, rep):
+    """Cached Gemini summary of one recording. Raises night_summary.SummaryError."""
+    key = (os.path.basename(path), os.path.getsize(path))
+    if key not in _summaries:
+        _summaries[key] = night_summary.summarize(rep)
+    return _summaries[key]
+
+
+def send_night(path, title):
+    """Night numbers + Gemini summary -> phone notification. Raises notify.NotifyError."""
+    rep = sleepdata.build_report(sleepdata.load_readings(path))
+    if "error" in rep:
+        raise notify.NotifyError(rep["error"])
+    try:
+        text = gemini_summary(path, rep)["text"]
+    except night_summary.SummaryError:
+        text = None                     # still send the numbers
+    notify.send(title, notify.night_message(rep, text))
+
+
+@app.get("/api/summary")
+def summary(file: str):
+    path = os.path.join(DATA, os.path.basename(file))
+    if not os.path.isfile(path):
+        return JSONResponse({"error": "File not found."}, status_code=404)
+    rep = sleepdata.build_report(sleepdata.load_readings(path))
+    if "error" in rep:
+        return JSONResponse(rep, status_code=400)
+    try:
+        return gemini_summary(path, rep)
+    except night_summary.SummaryError as e:
+        return JSONResponse({"error": str(e)}, status_code=502)
+
+
+@app.post("/api/notify")
+def notify_phone(file: str):
+    path = os.path.join(DATA, os.path.basename(file))
+    if not os.path.isfile(path):
+        return JSONResponse({"error": "File not found."}, status_code=404)
+    try:
+        send_night(path, "Stillwave - your night")
+    except notify.NotifyError as e:
+        return JSONResponse({"error": str(e)}, status_code=502)
+    return {"ok": True}
+
+
 @app.websocket("/ws")
 async def ws(socket: WebSocket):
     await socket.accept()
@@ -202,4 +295,6 @@ async def ws(socket: WebSocket):
 if __name__ == "__main__":
     print(f"Saving to {sensor.path}")
     print("Dashboard: http://localhost:8000   Report: http://localhost:8000/report")
+    print("Gemini summary:", "ready" if night_summary.load_key() else "no API key (add GEMINI_API_KEY to .env)")
+    print("Phone notifications:", f"ready (ntfy topic {notify.topic()})" if notify.topic() else "off (add NTFY_TOPIC to .env)")
     uvicorn.run(app, host="127.0.0.1", port=8000, log_level="warning")

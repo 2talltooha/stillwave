@@ -23,7 +23,8 @@ import trimesh
 from manifold3d import CrossSection, JoinType, Manifold
 
 # ---------- measure these ----------
-RADAR_H = 34.0      # radar board height (width doesn't matter: the groove runs edge to edge)
+RADAR_H = 23.0      # radar board height, measured off the breadboard (23 x 23 mm, +-1)
+RADAR_W = 23.0      # only used for the preview; the groove runs edge to edge
 RADAR_T = 1.6       # bare board thickness
 # ---------- shared ----------
 WALL = 2.0
@@ -31,7 +32,7 @@ RIM_T = 2.0         # thickness of the front rim (the fabric glues onto its outs
 FRONT_GAP = 4.0     # space between the fabric and the radar's chips
 GROOVE_W = RADAR_T + 1.0
 GROOVE_D = 3.0
-PIN_NOTCH_W = 26.0  # notch behind the groove for the radar's header and jumper plugs
+PIN_NOTCH_W = 30.0  # notch behind the groove: the header pins stick out the back along the bottom edge
 BLOCK_W = 50.0      # width of the radar block (the groove is open at both ends)
 BACK_T = 2.0
 LIP_H = 4.0
@@ -53,7 +54,7 @@ def radar_block(x_half, ped_top):
     ped = box(-x_half, x_half, WALL - 0.01, ped_top, RIM_T - 0.01, PED_D)
     groove = box(-x_half - 1, x_half + 1, ped_top - GROOVE_D, ped_top + 1,
                  GROOVE_Z, GROOVE_Z + GROOVE_W)
-    notch = box(-PIN_NOTCH_W / 2, PIN_NOTCH_W / 2, ped_top - GROOVE_D - 4, ped_top + 1,
+    notch = box(-PIN_NOTCH_W / 2, PIN_NOTCH_W / 2, ped_top - GROOVE_D - 6, ped_top + 1,
                 GROOVE_Z + GROOVE_W - 0.01, PED_D + 1)
     return ped - groove - notch
 
@@ -67,9 +68,9 @@ def vents(z0, z1, xs, y0, y1):
 
 
 # ======================= style 1: soft rounded cube =======================
-CUBE = 82.0         # width and height
-CUBE_R = 16.0       # corner rounding
-CUBE_DEPTH = 66.0   # front to back, without the back cover
+CUBE = 90.0         # width and height (room for extra parts later)
+CUBE_R = 18.0       # corner rounding
+CUBE_DEPTH = 72.0   # front to back, without the back cover
 CHAMFER = 1.5       # small bevel on the front edge
 
 
@@ -101,7 +102,7 @@ def cube_back():
     ring = (cube_profile(-(WALL + FIT)) - cube_profile(-(WALL + FIT + LIP_T))).extrude(LIP_H)
     back = plate + ring.translate([0, 0, BACK_T])
     back = back - box(-CABLE_W / 2, CABLE_W / 2, -1, CABLE_H, -1, BACK_T + LIP_H + 1)
-    back = back - vents(-1, BACK_T + 1, [-24, -12, 0, 12, 24], CUBE / 2 + 2, CUBE - 14)
+    back = back - vents(-1, BACK_T + 1, [-30, -20, -10, 0, 10, 20, 30], CABLE_H + 8, CUBE - 16)
     return back
 
 
@@ -157,7 +158,7 @@ def orb_back():
     lip = (CrossSection.circle(SOCKET_R - FIT, SEG) - CrossSection.circle(SOCKET_R - FIT - LIP_T, SEG))
     back = plate + lip.translate([0, ORB_CY]).extrude(LIP_H).translate([0, 0, BACK_T])
     back = back - box(-CABLE_W / 2, CABLE_W / 2, -1, CABLE_H, -1, BACK_T + LIP_H + 1)
-    back = back - vents(-1, BACK_T + 1, [-24, -12, 0, 12, 24], ORB_CY + 6, ORB_CY + 24)
+    back = back - vents(-1, BACK_T + 1, [-24, -16, -8, 0, 8, 16, 24], ORB_CY - 4, ORB_CY + 24)
     return back
 
 
