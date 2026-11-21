@@ -1,0 +1,162 @@
+"""
+sleepdata.py - shared logic for the live state and the night report.
+
+Reads two file formats:
+  * session CSVs written by server.py (data/session_*.csv)
+  * night files written by capture.py (data/night_*.txt, lines like "02:11:19,Q,...")
+"""
+
+import csv
+import os
+from datetime import datetime, timedelta
+
+RESTLESS_THRESHOLD = 40     # radar moving_range above this = restless
+RESTLESS_HOLD_S = 10        # stay "restless" this long after the last big movement
+SLEEP_NAMES = {0: "deep", 1: "light", 2: "awake", 3: "none"}
+
+
+def live_state(presence, moving_range, breath_rate, sleep_state, last_big_move_age):
+    """One word for the dashboard."""
+    if presence == 0:
+        return "EMPTY"
+    if moving_range > RESTLESS_THRESHOLD or (last_big_move_age is not None and last_big_move_age < RESTLESS_HOLD_S):
+        return "RESTLESS"
+    if breath_rate == 0:
+        return "LOCKING ON"
+    if sleep_state in (0, 1):
+        return "ASLEEP"
+    return "STILL"
+
+
+# ---------- loading ----------
+
+def load_readings(path):
+    """Returns a list of dicts with: t (datetime), presence, moving_range, breath_rate,
+    heart_rate, in_bed, sleep_state. Works for both file formats."""
+    if path.endswith(".csv"):
+        return _load_session_csv(path)
+    return _load_night_txt(path)
+
+
+def _load_session_csv(path):
+    out = []
+    with open(path, newline="") as f:
+        for row in csv.DictReader(f):
+            if row.get("kind") != "R":
+                continue
+            try:
+                out.append({
+                    "t": datetime.fromisoformat(row["wall_time"]),
+                    "presence": int(row["presence"]),
+                    "moving_range": int(row["moving_range"]),
+                    "breath_rate": int(row["breath_rate"]),
+                    "heart_rate": int(row["heart_rate"]),
+                    "in_bed": int(row["in_bed"]),
+                    "sleep_state": int(row["sleep_state"]),
+                })
+            except (ValueError, KeyError):
+                continue
+    return out
+
+
+def _load_night_txt(path):
+    """capture.py format: HH:MM:SS,Q,ms,in_bed,sleep_state,b_state,b_rate,hr,moving_range,struggle
+    The date comes from the file name (night_YYYYMMDD_HHMMSS.txt)."""
+    base = os.path.basename(path)
+    try:
+        day = datetime.strptime(base.split("_")[1], "%Y%m%d")
+    except (IndexError, ValueError):
+        day = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    out = []
+    prev = None
+    with open(path, errors="ignore") as f:
+        for line in f:
+            parts = line.strip().split(",")
+            if len(parts) < 10 or parts[1] != "Q":
+                continue
+            try:
+                hh, mm, ss = map(int, parts[0].split(":"))
+                _, in_bed, sstate, _bstate, brate, hr, mrange = map(int, parts[2:9])
+            except ValueError:
+                continue
+            t = day + timedelta(hours=hh, minutes=mm, seconds=ss)
+            if prev and t < prev:          # crossed midnight
+                day += timedelta(days=1)
+                t += timedelta(days=1)
+            prev = t
+            out.append({"t": t, "presence": in_bed, "moving_range": mrange, "breath_rate": brate,
+                        "heart_rate": hr, "in_bed": in_bed, "sleep_state": sstate})
+    return out
+
+
+# ---------- report ----------
+
+def build_report(readings):
+    if len(readings) < 2:
+        return {"error": "Not enough data in this file."}
+
+    start, end = readings[0]["t"], readings[-1]["t"]
+    secs = {"deep": 0.0, "light": 0.0, "awake": 0.0, "none": 0.0}
+    in_bed_s = 0.0
+    restless = []            # list of [start, end]
+    last_big = None
+    timeline = []            # one point per reading for the charts
+
+    for a, b in zip(readings, readings[1:]):
+        dt = (b["t"] - a["t"]).total_seconds()
+        if dt <= 0 or dt > 120:          # skip gaps (USB drops, restarts)
+            continue
+        if a["in_bed"] == 1 or a["presence"] == 1:
+            in_bed_s += dt
+            secs[SLEEP_NAMES.get(a["sleep_state"], "none")] += dt
+
+    for r in readings:
+        big = r["moving_range"] > RESTLESS_THRESHOLD
+        if big:
+            if last_big and (r["t"] - last_big).total_seconds() <= RESTLESS_HOLD_S * 3 and restless:
+                restless[-1][1] = r["t"]
+            else:
+                restless.append([r["t"], r["t"]])
+            last_big = r["t"]
+        age = (r["t"] - last_big).total_seconds() if last_big else None
+        timeline.append({
+            "t": r["t"].strftime("%H:%M:%S"),
+            "rate": r["breath_rate"] or None,
+            "heart": r["heart_rate"] or None,
+            "state": live_state(r["presence"], r["moving_range"], r["breath_rate"], r["sleep_state"], age),
+            "sleep": SLEEP_NAMES.get(r["sleep_state"], "none"),
+            "move": r["moving_range"],
+        })
+
+    rates = [r["breath_rate"] for r in readings if r["breath_rate"] > 0 and r["presence"] == 1]
+    rates_sorted = sorted(rates)
+    asleep_s = secs["deep"] + secs["light"]
+
+    def mins(s):
+        return round(s / 60)
+
+    return {
+        "start": start.strftime("%Y-%m-%d %H:%M"),
+        "end": end.strftime("%H:%M"),
+        "recorded_min": mins((end - start).total_seconds()),
+        "in_bed_min": mins(in_bed_s),
+        "asleep_min": mins(asleep_s),
+        "deep_min": mins(secs["deep"]),
+        "light_min": mins(secs["light"]),
+        "awake_min": mins(secs["awake"]),
+        "sleep_efficiency_pct": round(100 * asleep_s / in_bed_s) if in_bed_s else 0,
+        "breath_avg": round(sum(rates) / len(rates), 1) if rates else None,
+        "breath_low": rates_sorted[len(rates_sorted) // 20] if rates else None,     # 5th percentile
+        "breath_high": rates_sorted[-1 - len(rates_sorted) // 20] if rates else None,  # 95th percentile
+        "restless_count": len(restless),
+        "restless_periods": [{"start": s.strftime("%H:%M:%S"),
+                              "seconds": max(5, round((e - s).total_seconds()))} for s, e in restless],
+        "timeline": timeline,
+    }
+
+
+def list_recordings(folder="data"):
+    if not os.path.isdir(folder):
+        return []
+    files = [f for f in os.listdir(folder) if f.endswith((".csv", ".txt"))]
+    return sorted(files, reverse=True)
