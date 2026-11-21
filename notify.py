@@ -57,7 +57,7 @@ def night_message(report, summary_text=None):
     text = " · ".join(parts)
     if summary_text:
         text += "\n\n" + summary_text
-    return text
+    return text + "\n\nRadar estimates, not medical advice."
 
 
 def week_message(week):
@@ -71,4 +71,5 @@ def week_message(week):
     if week.get("dips_per_hour") is not None:
         parts.append(f"{week['dips_per_hour']} breathing dips/h")
     longest = week["longest"]
-    return " · ".join(parts) + f"\n\nLongest night: {longest['night']} ({_hm(longest['in_bed_min'])} in bed)."
+    return (" · ".join(parts) + f"\n\nLongest night: {longest['night']} ({_hm(longest['in_bed_min'])} in bed)."
+            + "\n\nRadar estimates, not medical advice.")

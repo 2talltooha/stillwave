@@ -240,6 +240,10 @@ function tick() {
         : `Sit still and breathe normally... ${STILL_NEED - still} s`,
       locked ? still / STILL_NEED : 0);
   }
+  if (["count", "hold", "wait"].includes(CH.phase) && !d.connected) {
+    CH.phase = "done"; CH.doneAt = now;          // lost the sensor: don't count this try
+    return chShow("", "\u2013", "Sensor disconnected", "Challenge cancelled. It won't count toward the tally.", null);
+  }
   if (CH.phase === "count") {
     const left = 3 - Math.floor((now - CH.t0) / 1000);
     if (left <= 0) { CH.phase = "hold"; CH.t0 = now; CH.dips0 = d.dip_count || 0; }
@@ -260,11 +264,23 @@ $("tryBtn").onclick = () => { CH.phase = "ready"; tick(); };
 $("chCancel").onclick = stopChallenge;
 showTally();
 
+let lastMsg = 0, offline = false;
+function goOffline(text) {
+  // keep the chart and events, but stop showing live numbers that are no longer live
+  const old = snap || {};
+  render({ connected: false, latest: {}, history: old.history || [], events: old.events || [],
+           in_bed_s: 0, dip_count: old.dip_count || 0, last_dip_ago: null, still_s: 0 });
+  $("conn").textContent = text;
+  offline = true;
+}
 function connect() {
   const ws = new WebSocket(`ws://${location.host}/ws`);
-  ws.onmessage = e => render(JSON.parse(e.data));
-  ws.onclose = () => { $("conn").textContent = "server stopped - reconnecting"; setTimeout(connect, 2000); };
+  ws.onmessage = e => { lastMsg = Date.now(); offline = false; render(JSON.parse(e.data)); };
+  ws.onclose = () => { goOffline("server stopped - reconnecting"); setTimeout(connect, 2000); };
 }
+setInterval(() => {   // the server sends every second; silence means the link is dead
+  if (lastMsg && !offline && Date.now() - lastMsg > 5000) goOffline("no data from server");
+}, 1000);
 connect();
 window.addEventListener("resize", () => draw([]));
 </script>

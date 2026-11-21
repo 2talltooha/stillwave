@@ -101,7 +101,7 @@
   <p class="note">Contactless 60 GHz radar, nothing worn. Sleep stages come from the radar's built-in estimate.
   A breathing dip is a sharp slow-down in breathing while you were still. A pause in breathing looks like a dip,
   but so do normal changes during sleep, so dips are not an apnea count. In testing, Stillwave caught 8 of 8
-  deliberate breath holds and logged about 5 dips an hour in a normal night.
+  deliberate breath holds in informal self-tests (one person) and logged about 5 dips an hour in one hour of normal sleep.
   This is not a diagnosis; sleep clinics use airflow and oxygen sensors.</p>
 </main>
 
@@ -130,6 +130,7 @@ function drawStages(tl) {
   const rowY = { awake: 0, light: 1, deep: 2, none: 1 };
   const bandH = (H - 20) / 3;
   for (let i = 0; i < tl.length - 1; i++) {
+    if (tl[i + 1].gap) continue;                 // no data here: leave it blank
     const x0 = xs[i] / total * W, x1 = xs[i + 1] / total * W;
     const stage = tl[i].state === "EMPTY" ? "none" : tl[i].sleep;
     g.fillStyle = css(colors[stage] || "--none");
@@ -153,11 +154,12 @@ function drawBreath(tl) {
 
   // restless shading
   g.fillStyle = "rgba(242,169,59,.22)";
-  tl.forEach((p, i) => { if (p.state === "RESTLESS" && i < tl.length - 1) g.fillRect(X(xs[i]), pad.t, Math.max(2, X(xs[i + 1]) - X(xs[i])), H - pad.t - pad.b); });
+  tl.forEach((p, i) => { if (p.state === "RESTLESS" && i < tl.length - 1 && !tl[i + 1].gap) g.fillRect(X(xs[i]), pad.t, Math.max(2, X(xs[i + 1]) - X(xs[i])), H - pad.t - pad.b); });
 
   g.strokeStyle = css("--breath"); g.lineWidth = 2; g.beginPath();
   let on = false;
   tl.forEach((p, i) => {
+    if (p.gap) on = false;                       // don't draw across missing data
     if (!p.rate || p.state === "EMPTY") { on = false; return; }
     const x = X(xs[i]), y = Y(Math.max(minR, Math.min(maxR, p.rate)));
     on ? g.lineTo(x, y) : g.moveTo(x, y); on = true;
@@ -187,15 +189,19 @@ function resetSummary() {
   $("summaryBtn").textContent = "Summarize with Gemini";
 }
 
+let view = 0;   // bumps whenever another recording is opened, so late answers for the old one are ignored
+
 async function summarize() {
-  const btn = $("summaryBtn"), out = $("summaryText");
+  const btn = $("summaryBtn"), out = $("summaryText"), mine = view;
   btn.disabled = true; btn.textContent = "Asking Gemini...";
   try {
     const r = await fetch(`/api/summary?file=${encodeURIComponent($("file").value)}`).then(x => x.json());
+    if (mine !== view) return;
     if (r.error) { out.className = "note err"; out.textContent = r.error; btn.disabled = false; btn.textContent = "Try again"; return; }
     out.className = ""; out.textContent = r.text;
     btn.textContent = `Written by ${r.model} · not medical advice`;
   } catch (e) {
+    if (mine !== view) return;
     out.className = "note err"; out.textContent = "The server didn't answer. Is it running?";
     btn.disabled = false; btn.textContent = "Try again";
   }
@@ -228,9 +234,12 @@ async function sendWeek() {
 }
 
 async function load(file) {
+  const mine = ++view;
   resetSummary();
   $("phoneStatus").textContent = "";
+  $("lead").textContent = "Loading...";
   const r = await fetch(`/api/report?file=${encodeURIComponent(file)}`).then(x => x.json());
+  if (mine !== view) return false;
   if (r.error) {
     $("lead").innerHTML = `<span class="err">${r.error}</span>`;
     drawStages([]); drawBreath([]);
@@ -245,7 +254,7 @@ async function load(file) {
     ? `${r.dip_count} <small>(${r.dips_per_hour}/h)</small>` : r.dip_count;
   const events = [
     ...r.restless_periods.map(p => ({ t: p.start, html: `<td>${p.start}</td><td>Restless</td><td>${p.seconds} s</td>` })),
-    ...r.dips.map(p => ({ t: p.t, html: `<td>${p.t}</td><td class="dip">Breathing dip</td><td>rate fell by ${p.drop}/min</td>` })),
+    ...r.dips.map(p => ({ t: p.t, html: `<td>${p.t}</td><td class="dip">Breathing dip</td><td>${p.from != null ? `${p.from} to ${p.to} breaths/min after ${p.still_s} s still` : `rate fell by ${p.drop}/min`}</td>` })),
   ];
   const base = secs(r.timeline[0].t);
   const key = t => { const v = secs(t); return v < base - 60 ? v + 86400 : v; };   // past midnight

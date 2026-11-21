@@ -16,40 +16,48 @@ RESTLESS_HOLD_S = 10        # stay "restless" this long after the last big movem
 SLEEP_NAMES = {0: "deep", 1: "light", 2: "awake", 3: "none"}
 
 # Breathing dips: the radar's breathing rate falls by DIP_DROP or more within DIP_WINDOW_S,
-# while the person has been still for DIP_STILL_S (movement throws off the radar's breathing estimate).
+# after the person has been watched being still for DIP_STILL_S (movement throws off the radar's estimate).
 # A breath hold or pause looks like this, but so do normal slow-downs, so this is NOT an apnea count.
-# Tuned on 21 Nov recordings: caught 7 of 7 deliberate 25-40 s breath holds (and an 8th live test) (fired 15 s before to
-# 35 s after), and fired about 5 times an hour during an hour of normal sleep (no holds).
+# Informal self-tests on 21 Nov (one person): 8 of 8 deliberate breath holds flagged, and about 5 dips
+# an hour during one hour of normal sleep.
 DIP_DROP = 6            # breaths per minute
 DIP_WINDOW_S = 30
 DIP_GAP_S = 60          # dips closer together than this count once
-DIP_STILL_S = 40        # ignore dips within this long after movement
+DIP_STILL_S = 40        # need this long of observed stillness before a dip can count
 DIP_STILL_MAX = 15      # radar moving_range above this counts as movement
+DIP_DATA_GAP_S = 30     # no readings for this long (USB drop, restart) -> start observing again
 
 
 class DipDetector:
-    """Feed it readings in time order; update() returns the size of the drop when a new dip starts."""
+    """Feed it readings in time order. update() returns a dict when a new dip starts, else None."""
 
     def __init__(self):
         self.recent = deque()       # (seconds, rate) of locked readings in the last DIP_WINDOW_S
         self.last_dip = None
-        self.last_move = None
+        self.still_since = None     # start of the current observed still stretch
+        self.last_seen = None
+
+    def still_for(self, t):
+        return 0 if self.still_since is None else max(0, t - self.still_since)
 
     def update(self, t, rate, breath_state, moving_range=0):
         """t: seconds (any origin). breath_state 1 = radar has locked onto breathing."""
-        if moving_range > DIP_STILL_MAX:
-            self.last_move = t
+        if self.last_seen is not None and t - self.last_seen > DIP_DATA_GAP_S:
+            self.still_since = None
+            self.recent.clear()
+        self.last_seen = t
+        if moving_range > DIP_STILL_MAX or self.still_since is None:
+            self.still_since = t
         if breath_state != 1 or rate <= 0:
             return None
         while self.recent and t - self.recent[0][0] > DIP_WINDOW_S:
             self.recent.popleft()
         hit = None
-        still = self.last_move is None or t - self.last_move > DIP_STILL_S
-        if self.recent and still:
-            drop = max(r for _, r in self.recent) - rate
-            if drop >= DIP_DROP and (self.last_dip is None or t - self.last_dip > DIP_GAP_S):
+        if self.recent and self.still_for(t) >= DIP_STILL_S:
+            peak = max(r for _, r in self.recent)
+            if peak - rate >= DIP_DROP and (self.last_dip is None or t - self.last_dip > DIP_GAP_S):
                 self.last_dip = t
-                hit = drop
+                hit = {"drop": peak - rate, "from": peak, "to": rate, "still_s": round(self.still_for(t))}
         self.recent.append((t, rate))
         return hit
 
@@ -145,15 +153,19 @@ def build_report(readings):
     dips = []
     detector = DipDetector()
 
-    for a, b in zip(readings, readings[1:]):
+    observed_s = 0.0
+    gap_after = set()        # indexes of readings that come right after a gap
+    for i, (a, b) in enumerate(zip(readings, readings[1:])):
         dt = (b["t"] - a["t"]).total_seconds()
         if dt <= 0 or dt > 120:          # skip gaps (USB drops, restarts)
+            gap_after.add(i + 1)
             continue
+        observed_s += dt
         if a["in_bed"] == 1 or a["presence"] == 1:
             in_bed_s += dt
             secs[SLEEP_NAMES.get(a["sleep_state"], "none")] += dt
 
-    for r in readings:
+    for i, r in enumerate(readings):
         big = r["moving_range"] > RESTLESS_THRESHOLD
         if big:
             if last_big and (r["t"] - last_big).total_seconds() <= RESTLESS_HOLD_S * 3 and restless:
@@ -162,9 +174,9 @@ def build_report(readings):
                 restless.append([r["t"], r["t"]])
             last_big = r["t"]
         age = (r["t"] - last_big).total_seconds() if last_big else None
-        drop = detector.update(r["t"].timestamp(), r["breath_rate"], r.get("breath_state", 1), r["moving_range"])
-        if drop:
-            dips.append({"t": r["t"].strftime("%H:%M:%S"), "drop": drop})
+        dip = detector.update(r["t"].timestamp(), r["breath_rate"], r.get("breath_state", 1), r["moving_range"])
+        if dip:
+            dips.append({"t": r["t"].strftime("%H:%M:%S"), **dip})
         timeline.append({
             "t": r["t"].strftime("%H:%M:%S"),
             "rate": r["breath_rate"] or None,
@@ -172,7 +184,8 @@ def build_report(readings):
             "state": live_state(r["presence"], r["moving_range"], r["breath_rate"], r["sleep_state"], age),
             "sleep": SLEEP_NAMES.get(r["sleep_state"], "none"),
             "move": r["moving_range"],
-            "dip": drop or 0,
+            "dip": dip["drop"] if dip else 0,
+            "gap": i in gap_after,
         })
 
     rates = [r["breath_rate"] for r in readings if r["breath_rate"] > 0 and r["presence"] == 1]
@@ -185,7 +198,7 @@ def build_report(readings):
     return {
         "start": start.strftime("%Y-%m-%d %H:%M"),
         "end": end.strftime("%H:%M"),
-        "recorded_min": mins((end - start).total_seconds()),
+        "recorded_min": mins(observed_s),        # time with data, gaps left out
         "in_bed_min": mins(in_bed_s),
         "asleep_min": mins(asleep_s),
         "deep_min": mins(secs["deep"]),
@@ -205,17 +218,22 @@ def build_report(readings):
     }
 
 
+def night_only(readings):
+    """Drop afternoon readings (12:00-18:00) so testing during the day doesn't count as sleep."""
+    return [r for r in readings if r["t"].hour >= 18 or r["t"].hour < 12]
+
+
 def week_summary(folder="data", days=7, now=None):
     """Screen-Time-style weekly roll-up of the nights recorded in the last `days` days.
-    A recording counts as a night if it started between 6 pm and 6 am and has an hour or more in bed."""
+    Uses the night-time part of each recording (6 pm to noon); it counts if that has an hour or more in bed."""
     now = now or datetime.now()
     nights = []
     for name in list_recordings(folder):
-        readings = load_readings(os.path.join(folder, name))
+        readings = night_only(load_readings(os.path.join(folder, name)))
         if len(readings) < 2:
             continue
         start = readings[0]["t"]
-        if now - start > timedelta(days=days) or not (start.hour >= 18 or start.hour < 6):
+        if now - start > timedelta(days=days):
             continue
         rep = build_report(readings)
         if rep.get("in_bed_min", 0) < 60:

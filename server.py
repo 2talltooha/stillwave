@@ -21,11 +21,12 @@ from datetime import datetime
 import serial
 import serial.tools.list_ports
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 
 import night_summary
 import notify
+import settings
 import sleepdata
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -65,9 +66,14 @@ class Sensor:
         self.morning_sent = False
 
     def _port(self):
-        for p in serial.tools.list_ports.comports():
-            if any(k in p.description for k in ("CP210", "CH340", "USB")):
-                return p.device
+        forced = settings.get("SERIAL_PORT")          # e.g. SERIAL_PORT=COM3 in .env
+        if forced:
+            return forced
+        ports = list(serial.tools.list_ports.comports())
+        for keys in (("CP210", "CH340"), ("USB",)):   # ESP32 USB chips first, then anything USB
+            for p in ports:
+                if any(k in p.description for k in keys):
+                    return p.device
         return None
 
     def run(self):
@@ -118,7 +124,7 @@ class Sensor:
                 self.latest = {"presence": presence, "moving_range": mrange, "breath_rate": brate,
                                "heart_rate": hr, "in_bed": in_bed,
                                "sleep": sleepdata.SLEEP_NAMES.get(sstate, "none"), "state": state}
-                self.history.append((now, brate, hr, mrange, state, dip or 0))
+                self.history.append((now, brate, hr, mrange, state, dip["drop"] if dip else 0))
                 while self.history and now - self.history[0][0] > 15 * 60:
                     self.history.popleft()
                 self._track_events(now, state, presence)
@@ -127,7 +133,8 @@ class Sensor:
                     self.dip_count += 1
                     self.last_dip_t = now
                     self.events.appendleft((datetime.now().strftime("%H:%M:%S"),
-                                            f"Breathing dip (rate fell by {dip}/min)"))
+                                            f"Breathing dip: {dip['from']} to {dip['to']} breaths/min "
+                                            f"after {dip['still_s']} s still"))
 
         elif parts[0] == "C" and len(nums) == 9:
             _, pres, sstate, avg_r, avg_h, turns, large, minor, apneas = nums
@@ -153,12 +160,12 @@ class Sensor:
             threading.Thread(target=self._send_morning, daemon=True).start()
 
     def _send_morning(self):
-        rep = sleepdata.build_report(sleepdata.load_readings(self.path))
+        rep = sleepdata.build_report(sleepdata.night_only(sleepdata.load_readings(self.path)))
         if rep.get("in_bed_min", 0) < notify.MORNING_MIN_IN_BED:
             return                      # a short test, not a night
         clock = datetime.now().strftime("%H:%M:%S")
         try:
-            send_night(self.path, "Stillwave - last night")
+            send_night(self.path, "Stillwave - last night", night=True)
             text = "Morning summary sent to your phone"
             self.morning_sent = True
             if datetime.now().weekday() == 6:          # Sunday: weekly roll-up too, like Screen Time
@@ -197,7 +204,7 @@ class Sensor:
                 "events": list(self.events),
                 "in_bed_s": round(now - self.in_bed_since) if self.in_bed_since else 0,
                 "dip_count": self.dip_count,
-                "still_s": round(now - (self.dips.last_move or self.session_start)),
+                "still_s": round(self.dips.still_for(now)),
                 "last_dip_ago": round(now - self.last_dip_t) if self.last_dip_t else None,
                 "file": os.path.basename(self.path),
             }
@@ -236,24 +243,36 @@ def report(file: str):
     return sleepdata.build_report(sleepdata.load_readings(path))
 
 
+ALLOWED_ORIGINS = {"http://localhost:8000", "http://127.0.0.1:8000"}
+
+
+def same_origin(origin):
+    """Browsers send Origin; other websites can't pass this check. No Origin = not a browser page."""
+    return origin is None or origin in ALLOWED_ORIGINS
+
+
 _summaries = {}     # (file, size) -> summary, so Gemini isn't asked twice about the same data
 
 
-def gemini_summary(path, rep):
+def gemini_summary(path, rep, variant="full"):
     """Cached Gemini summary of one recording. Raises night_summary.SummaryError."""
-    key = (os.path.basename(path), os.path.getsize(path))
+    key = (os.path.basename(path), os.path.getsize(path), variant)
     if key not in _summaries:
         _summaries[key] = night_summary.summarize(rep)
     return _summaries[key]
 
 
-def send_night(path, title):
-    """Night numbers + Gemini summary -> phone notification. Raises notify.NotifyError."""
-    rep = sleepdata.build_report(sleepdata.load_readings(path))
+def send_night(path, title, night=False):
+    """Night numbers + Gemini summary -> phone notification. Raises notify.NotifyError.
+    night=True leaves out afternoon readings (for the automatic morning summary)."""
+    readings = sleepdata.load_readings(path)
+    if night:
+        readings = sleepdata.night_only(readings)
+    rep = sleepdata.build_report(readings)
     if "error" in rep:
         raise notify.NotifyError(rep["error"])
     try:
-        text = gemini_summary(path, rep)["text"]
+        text = gemini_summary(path, rep, "night" if night else "full")["text"]
     except night_summary.SummaryError:
         text = None                     # still send the numbers
     notify.send(title, notify.night_message(rep, text))
@@ -281,7 +300,9 @@ def summary(file: str):
 
 
 @app.post("/api/notify")
-def notify_phone(file: str):
+def notify_phone(file: str, request: Request):
+    if not same_origin(request.headers.get("origin")):
+        return JSONResponse({"error": "Not allowed from another site."}, status_code=403)
     path = os.path.join(DATA, os.path.basename(file))
     if not os.path.isfile(path):
         return JSONResponse({"error": "File not found."}, status_code=404)
@@ -293,7 +314,9 @@ def notify_phone(file: str):
 
 
 @app.post("/api/notify_week")
-def notify_week():
+def notify_week(request: Request):
+    if not same_origin(request.headers.get("origin")):
+        return JSONResponse({"error": "Not allowed from another site."}, status_code=403)
     try:
         send_week()
     except notify.NotifyError as e:
@@ -308,6 +331,9 @@ def week():
 
 @app.websocket("/ws")
 async def ws(socket: WebSocket):
+    if not same_origin(socket.headers.get("origin")):
+        await socket.close(code=1008)                 # another website trying to read live data
+        return
     await socket.accept()
     try:
         while True:
