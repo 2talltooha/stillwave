@@ -64,6 +64,10 @@ class Sensor:
         self.empty_since = None         # for the automatic morning notification
         self.morning_checked = False
         self.morning_sent = False
+        self.present_since = None       # for the out-of-bed alert
+        self.left_at = None
+        self.oob_armed = False
+        self.oob_sent = False
 
     def _port(self):
         forced = settings.get("SERIAL_PORT")          # e.g. SERIAL_PORT=COM3 in .env
@@ -78,12 +82,12 @@ class Sensor:
 
     def run(self):
         while True:
-            port = self._port()
-            if not port:
-                self.connected = False
-                time.sleep(2)
-                continue
             try:
+                port = self._port()
+                if not port:
+                    self.connected = False
+                    time.sleep(2)
+                    continue
                 with serial.Serial(port, BAUD, timeout=1) as ser:
                     time.sleep(0.5)
                     ser.reset_input_buffer()
@@ -97,6 +101,10 @@ class Sensor:
                 self.connected = False
                 print("# USB lost, reconnecting...")
                 time.sleep(2)
+            except Exception as e:                    # never let the reader thread die overnight
+                self.connected = False
+                print(f"# reader error ({e!r}), restarting...")
+                time.sleep(2)
 
     def _handle(self, line):
         if line.startswith("#"):
@@ -108,15 +116,17 @@ class Sensor:
         try:
             nums = list(map(int, parts[1:]))
         except ValueError:
+            print("# dropped:", repr(line))
             return
 
         if parts[0] == "R" and len(nums) == 9:
             esp_ms, presence, movement, mrange, bstate, brate, hr, in_bed, sstate = nums
+            brate, hr = sleepdata.clean(brate), sleepdata.clean(hr)     # 255 = radar query timed out
             if mrange > sleepdata.RESTLESS_THRESHOLD:
                 self.last_big_move_t = now
             age = now - self.last_big_move_t if self.last_big_move_t else None
             state = sleepdata.live_state(presence, mrange, brate, sstate, age)
-            dip = self.dips.update(now, brate, bstate, mrange)
+            dip = self.dips.update(int(now), brate, bstate, mrange)   # whole seconds, like the report
             self.w.writerow(["R", wall, esp_ms, presence, movement, mrange, bstate, brate, hr, in_bed, sstate, ""])
             self.f.flush()
             with self.lock:
@@ -129,6 +139,7 @@ class Sensor:
                     self.history.popleft()
                 self._track_events(now, state, presence)
                 self._check_morning(now, presence)
+                self._check_out_of_bed(now, presence)
                 if dip:
                     self.dip_count += 1
                     self.last_dip_t = now
@@ -146,6 +157,45 @@ class Sensor:
                 self.summary = {"avg_resp": avg_r, "avg_heart": avg_h, "turnovers": turns,
                                 "large_moves": large, "minor_moves": minor, "apneas": apneas}
 
+    def _check_out_of_bed(self, now, presence):
+        """Caregiver alert: someone who was in bed for a while got up and hasn't come back.
+        Off unless OUT_OF_BED_ALERT_MIN is set in .env. The same number is how long they must
+        have been in bed first, so a demo can use 1 and a real night 10."""
+        limit = notify.out_of_bed_minutes() * 60
+        if not limit:
+            return
+        if presence == 1:
+            if self.left_at is not None:                    # came back
+                if self.oob_sent:
+                    away = round((now - self.left_at) / 60)
+                    self._alert("Stillwave - back in bed", f"Back after {away} min out of bed.", "white_check_mark")
+                self.left_at, self.oob_sent = None, False
+            if self.present_since is None:
+                self.present_since = now
+            return
+        if self.left_at is None:                            # just left
+            self.left_at = now
+            self.oob_armed = self.present_since is not None and now - self.present_since >= limit
+            self.present_since = None
+        if self.oob_armed and not self.oob_sent and now - self.left_at >= limit:
+            self.oob_sent = True
+            left = datetime.fromtimestamp(self.left_at).strftime("%-I:%M %p" if os.name != "nt" else "%#I:%M %p")
+            self._alert("Stillwave - out of bed",
+                        f"Out of bed for {round((now - self.left_at) / 60)} min (got up at {left}). "
+                        "Radar presence only, not fall detection.", "warning")
+
+    def _alert(self, title, text, tags):
+        def go():
+            clock = datetime.now().strftime("%H:%M:%S")
+            try:
+                notify.send(title, text, tags=tags, to=notify.caregiver_topic())
+                msg = f"{title.split(' - ')[1].capitalize()} alert sent"
+            except notify.NotifyError as e:
+                msg = f"Couldn't send alert: {e}"
+            with self.lock:
+                self.events.appendleft((clock, msg))
+        threading.Thread(target=go, daemon=True).start()
+
     def _check_morning(self, now, presence):
         """Out of bed for 10 min after a real night -> send the night summary to the phone, once."""
         if presence == 1:
@@ -154,7 +204,7 @@ class Sensor:
             return
         if self.empty_since is None:
             self.empty_since = now
-        if (not self.morning_checked and not self.morning_sent
+        if (not self.morning_checked and not self.morning_sent and 5 <= datetime.now().hour < 13
                 and now - self.empty_since >= notify.MORNING_EMPTY_S and notify.topic()):
             self.morning_checked = True
             threading.Thread(target=self._send_morning, daemon=True).start()
@@ -193,7 +243,7 @@ class Sensor:
     def snapshot(self):
         with self.lock:
             now = time.time()
-            stale = self.last_reading_t is None or now - self.last_reading_t > 20
+            stale = self.last_reading_t is None or now - self.last_reading_t > 45
             hist = [{"ago": round(now - t), "rate": r or None, "heart": h or None, "move": m, "state": s, "dip": d}
                     for t, r, h, m, s, d in self.history]
             return {
@@ -221,12 +271,12 @@ def start_sensor():
 
 @app.get("/")
 def dashboard():
-    return FileResponse(os.path.join(WEB, "dashboard.html"))
+    return FileResponse(os.path.join(WEB, "dashboard.html"), headers={"Cache-Control": "no-store"})
 
 
 @app.get("/report")
 def report_page():
-    return FileResponse(os.path.join(WEB, "report.html"))
+    return FileResponse(os.path.join(WEB, "report.html"), headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/recordings")
@@ -343,9 +393,21 @@ async def ws(socket: WebSocket):
         pass
 
 
+def keep_awake():
+    """Ask Windows not to sleep on its own while the server runs (closing the lid still can)."""
+    if os.name == "nt":
+        import ctypes
+        ES_CONTINUOUS, ES_SYSTEM_REQUIRED = 0x80000000, 0x00000001
+        ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
+        print("Keeping the laptop awake while recording")
+
+
 if __name__ == "__main__":
     print(f"Saving to {sensor.path}")
     print("Dashboard: http://localhost:8000   Report: http://localhost:8000/report")
     print("Gemini summary:", "ready" if night_summary.load_key() else "no API key (add GEMINI_API_KEY to .env)")
-    print("Phone notifications:", f"ready (ntfy topic {notify.topic()})" if notify.topic() else "off (add NTFY_TOPIC to .env)")
+    print("Phone notifications:", "ready" if notify.topic() else "off (add NTFY_TOPIC to .env)")
+    oob = notify.out_of_bed_minutes()
+    print("Out-of-bed alert:", f"on, after {oob:g} min" if oob else "off (add OUT_OF_BED_ALERT_MIN to .env)")
+    keep_awake()
     uvicorn.run(app, host="127.0.0.1", port=8000, log_level="warning")

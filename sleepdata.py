@@ -26,6 +26,11 @@ DIP_GAP_S = 60          # dips closer together than this count once
 DIP_STILL_S = 40        # need this long of observed stillness before a dip can count
 DIP_STILL_MAX = 15      # radar moving_range above this counts as movement
 DIP_DATA_GAP_S = 30     # no readings for this long (USB drop, restart) -> start observing again
+BAD_VALUE = 200         # the radar answers 255 when a query times out; treat as "no reading"
+
+
+def clean(value):
+    return 0 if value >= BAD_VALUE else value
 
 
 class DipDetector:
@@ -97,12 +102,12 @@ def _load_session_csv(path):
                     "presence": int(row["presence"]),
                     "moving_range": int(row["moving_range"]),
                     "breath_state": int(row["breath_state"]),
-                    "breath_rate": int(row["breath_rate"]),
-                    "heart_rate": int(row["heart_rate"]),
+                    "breath_rate": clean(int(row["breath_rate"])),
+                    "heart_rate": clean(int(row["heart_rate"])),
                     "in_bed": int(row["in_bed"]),
                     "sleep_state": int(row["sleep_state"]),
                 })
-            except (ValueError, KeyError):
+            except (ValueError, KeyError, TypeError):    # half-written row after a power cut
                 continue
     return out
 
@@ -132,8 +137,9 @@ def _load_night_txt(path):
                 day += timedelta(days=1)
                 t += timedelta(days=1)
             prev = t
+            hr = clean(hr)
             out.append({"t": t, "presence": in_bed, "moving_range": mrange, "breath_state": bstate,
-                        "breath_rate": brate,
+                        "breath_rate": clean(brate),
                         "heart_rate": hr, "in_bed": in_bed, "sleep_state": sstate})
     return out
 
@@ -154,6 +160,7 @@ def build_report(readings):
     detector = DipDetector()
 
     observed_s = 0.0
+    tracked_s = 0.0          # in bed AND the radar had a breathing rate
     gap_after = set()        # indexes of readings that come right after a gap
     for i, (a, b) in enumerate(zip(readings, readings[1:])):
         dt = (b["t"] - a["t"]).total_seconds()
@@ -163,6 +170,8 @@ def build_report(readings):
         observed_s += dt
         if a["in_bed"] == 1 or a["presence"] == 1:
             in_bed_s += dt
+            if a["breath_rate"] > 0:
+                tracked_s += dt
             secs[SLEEP_NAMES.get(a["sleep_state"], "none")] += dt
 
     for i, r in enumerate(readings):
@@ -210,7 +219,8 @@ def build_report(readings):
         "breath_high": rates_sorted[-1 - len(rates_sorted) // 20] if rates else None,  # 95th percentile
         "restless_count": len(restless),
         "dip_count": len(dips),
-        "dips_per_hour": round(len(dips) / (in_bed_s / 3600), 1) if in_bed_s >= 600 else None,
+        "dips_per_hour": round(len(dips) / (in_bed_s / 3600), 1) if in_bed_s >= 3600 else None,  # only for 1 h+
+        "breathing_tracked_pct": round(100 * tracked_s / in_bed_s) if in_bed_s else 0,
         "dips": dips,
         "restless_periods": [{"start": s.strftime("%H:%M:%S"),
                               "seconds": max(5, round((e - s).total_seconds()))} for s, e in restless],
@@ -262,5 +272,6 @@ def week_summary(folder="data", days=7, now=None):
 def list_recordings(folder="data"):
     if not os.path.isdir(folder):
         return []
-    files = [f for f in os.listdir(folder) if f.endswith((".csv", ".txt"))]
+    files = [f for f in os.listdir(folder) if f.endswith((".csv", ".txt"))
+             and os.path.getsize(os.path.join(folder, f)) > 200]          # skip header-only files
     return sorted(files, reverse=True)

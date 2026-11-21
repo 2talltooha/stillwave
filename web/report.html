@@ -18,7 +18,7 @@
   select { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font-size: 15px; }
   main { padding: 0 32px 28px; max-width: 1200px; }
   .lead { color: var(--muted); margin: 0 0 18px; }
-  .cards { display: grid; grid-template-columns: repeat(5, 1fr); gap: 14px; margin-bottom: 18px; }
+  .cards { display: grid; grid-template-columns: repeat(6, 1fr); gap: 14px; margin-bottom: 18px; }
   .card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 16px 18px; }
   .card b { display: block; font-size: 34px; font-variant-numeric: tabular-nums; }
   .card span { color: var(--muted); font-size: 13px; }
@@ -61,6 +61,7 @@
     <div class="card"><b id="breath">-</b><span>avg breaths / min</span></div>
     <div class="card"><b id="restless">-</b><span>restless periods</span></div>
     <div class="card dip"><b id="dips">-</b><span>breathing dips</span></div>
+    <div class="card"><b id="tracked">-</b><span>breathing tracked</span></div>
   </div>
 
   <div class="panel summary">
@@ -250,6 +251,7 @@ async function load(file) {
   $("asleep").textContent = `${hm(r.asleep_min)}`;
   $("breath").textContent = r.breath_avg ?? "-";
   $("restless").textContent = r.restless_count;
+  $("tracked").textContent = `${r.breathing_tracked_pct}%`;
   $("dips").innerHTML = r.dips_per_hour != null
     ? `${r.dip_count} <small>(${r.dips_per_hour}/h)</small>` : r.dip_count;
   const events = [
@@ -271,7 +273,9 @@ async function load(file) {
   const files = await fetch("/api/recordings").then(x => x.json());
   $("file").innerHTML = files.map(f => `<option>${f}</option>`).join("");
   if (!files.length) { $("lead").textContent = "No recordings in the data folder yet."; return; }
-  // open the newest recording that actually has data
+  // ?file=name opens that recording (bookmarkable); otherwise the newest one with data
+  const wanted = new URLSearchParams(location.search).get("file");
+  if (wanted && files.includes(wanted)) files.unshift(...files.splice(files.indexOf(wanted), 1));
   for (const f of files) {
     if (await load(f)) { $("file").value = f; break; }
   }

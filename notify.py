@@ -26,8 +26,21 @@ def topic():
     return settings.get("NTFY_TOPIC")
 
 
-def send(title, message, tags="sleeping"):
-    t = topic()
+def caregiver_topic():
+    """Optional second topic for a family member; falls back to your own."""
+    return settings.get("CAREGIVER_TOPIC") or topic()
+
+
+def out_of_bed_minutes():
+    """OUT_OF_BED_ALERT_MIN=10 in .env turns the out-of-bed alert on. 0 / missing = off."""
+    try:
+        return max(0.0, float(settings.get("OUT_OF_BED_ALERT_MIN") or 0))
+    except ValueError:
+        return 0.0
+
+
+def send(title, message, tags="sleeping", to=None):
+    t = to or topic()
     if not t:
         raise NotifyError("No NTFY_TOPIC in .env. Add NTFY_TOPIC=your-topic and restart the server.")
     req = urllib.request.Request(f"{SERVER}/{t}", data=message.encode("utf-8"), method="POST",

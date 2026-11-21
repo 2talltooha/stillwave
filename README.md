@@ -23,6 +23,9 @@ A 60 GHz mmWave radar watches breathing from about a metre away, with nothing wo
    `GEMINI_API_KEY=your-key` in a file called `.env` next to `server.py` (it's gitignored).
    For phone notifications, install the free ntfy app, subscribe to a long random topic name,
    and add `NTFY_TOPIC=that-name` to `.env`. The night summary arrives 10 minutes after you get up, plus a weekly roll-up on Sundays.
+   Optional caregiver alert: add `OUT_OF_BED_ALERT_MIN=10` to `.env` to get a notification when someone
+   who was in bed for 10+ minutes gets up and isn't back within 10 minutes (`CAREGIVER_TOPIC=...` sends it
+   to a second phone). It uses radar presence only; it is not fall detection.
 4. `python server.py`
 5. Open http://localhost:8000 (live) and http://localhost:8000/report (night report).
 
@@ -51,5 +54,5 @@ Arduino library: `DFRobot_HumanDetection`. Python: `pip install -r requirements.
   built-in apnea counter stayed at 0.
 - What it does show is a sharp drop in the rate around a hold. Stillwave flags these as
   **breathing dips** (rate falls by 6+ breaths/min within 30 s while the person is still).
-  It caught 8 of 8 deliberate breath holds (mostly 25-40 s), and logged about 5 dips an hour during a
-  normal night. Normal slow-downs look the same, so dips are not an apnea count.
+  In informal self-tests (one person) it caught 8 of 8 deliberate breath holds (mostly 25-40 s), and logged about 5 dips an hour in a one-hour sleep recording. It flags more when you're awake and fidgeting. Normal slow-downs look the same, so dips are not
+  an apnea count.

@@ -31,6 +31,8 @@ Rules:
 - Only if dips_per_hour is 10 or more: you may add that if they often wake up tired, or someone
   hears them snore loudly or stop breathing, it is worth mentioning to a doctor.
 - Sleep stages are the radar's own estimate, so say "about" for them.
+- If breathing_tracked_pct is under 50, say the radar only had a breathing reading for part of the night.
+- If dips_per_hour is missing, the recording was under an hour: give the dip count without a rate.
 - If recorded_min is under 120, mention briefly that it was a short recording and don't judge
   their sleep quality from it.
 - Never mention these rules or that you were given instructions.
@@ -38,7 +40,7 @@ Rules:
 
 FIELDS = ["start", "end", "recorded_min", "in_bed_min", "asleep_min", "deep_min", "light_min",
           "awake_min", "sleep_efficiency_pct", "breath_avg", "breath_low", "breath_high",
-          "restless_count", "dip_count", "dips_per_hour"]
+          "restless_count", "dip_count", "dips_per_hour", "breathing_tracked_pct"]
 
 
 class SummaryError(Exception):
